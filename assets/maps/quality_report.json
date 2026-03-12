@@ -1,0 +1,598 @@
+{
+  "generated_at": "2026-03-06 12:16:03",
+  "phases": {
+    "phase1": {
+      "phase1_01.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 33,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_02.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 32,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_03.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 29,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_04.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 30,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_05.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 29,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_06.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 27,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_07.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 26,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_08.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 21,
+        "turns": 5,
+        "bomb_used": false
+      },
+      "phase1_09.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 20,
+        "turns": 4,
+        "bomb_used": false
+      },
+      "phase1_10.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 140,
+        "wall_ratio": 0.0,
+        "steps": 18,
+        "turns": 4,
+        "bomb_used": false
+      }
+    },
+    "phase2": {
+      "phase2_01.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 109,
+        "wall_ratio": 0.221,
+        "steps": 47,
+        "turns": 19,
+        "bomb_used": false
+      },
+      "phase2_02.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 110,
+        "wall_ratio": 0.214,
+        "steps": 42,
+        "turns": 18,
+        "bomb_used": false
+      },
+      "phase2_03.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 109,
+        "wall_ratio": 0.221,
+        "steps": 38,
+        "turns": 17,
+        "bomb_used": false
+      },
+      "phase2_04.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 108,
+        "wall_ratio": 0.229,
+        "steps": 34,
+        "turns": 16,
+        "bomb_used": false
+      },
+      "phase2_05.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 108,
+        "wall_ratio": 0.229,
+        "steps": 30,
+        "turns": 13,
+        "bomb_used": false
+      },
+      "phase2_06.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 113,
+        "wall_ratio": 0.193,
+        "steps": 28,
+        "turns": 13,
+        "bomb_used": false
+      },
+      "phase2_07.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 116,
+        "wall_ratio": 0.171,
+        "steps": 31,
+        "turns": 12,
+        "bomb_used": false
+      },
+      "phase2_08.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 114,
+        "wall_ratio": 0.186,
+        "steps": 26,
+        "turns": 10,
+        "bomb_used": false
+      },
+      "phase2_09.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 111,
+        "wall_ratio": 0.207,
+        "steps": 20,
+        "turns": 10,
+        "bomb_used": false
+      },
+      "phase2_10.txt": {
+        "boxes": 1,
+        "bombs": 0,
+        "open_count": 117,
+        "wall_ratio": 0.164,
+        "steps": 23,
+        "turns": 9,
+        "bomb_used": false
+      }
+    },
+    "phase3": {
+      "phase3_01.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 99,
+        "wall_ratio": 0.293,
+        "steps": 69,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 10
+      },
+      "phase3_02.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 110,
+        "wall_ratio": 0.214,
+        "steps": 51,
+        "box_changes": 3,
+        "bomb_used": false,
+        "path_overlap": 8
+      },
+      "phase3_03.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 104,
+        "wall_ratio": 0.257,
+        "steps": 47,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 6
+      },
+      "phase3_04.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 107,
+        "wall_ratio": 0.236,
+        "steps": 46,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 5
+      },
+      "phase3_05.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 111,
+        "wall_ratio": 0.207,
+        "steps": 46,
+        "box_changes": 3,
+        "bomb_used": false,
+        "path_overlap": 3
+      },
+      "phase3_06.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 102,
+        "wall_ratio": 0.271,
+        "steps": 55,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 3
+      },
+      "phase3_07.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 104,
+        "wall_ratio": 0.257,
+        "steps": 41,
+        "box_changes": 4,
+        "bomb_used": false,
+        "path_overlap": 1
+      },
+      "phase3_08.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 103,
+        "wall_ratio": 0.264,
+        "steps": 39,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 2
+      },
+      "phase3_09.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 103,
+        "wall_ratio": 0.264,
+        "steps": 41,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 1
+      },
+      "phase3_10.txt": {
+        "boxes": 2,
+        "bombs": 0,
+        "open_count": 99,
+        "wall_ratio": 0.293,
+        "steps": 34,
+        "box_changes": 1,
+        "bomb_used": false,
+        "path_overlap": 1
+      }
+    },
+    "phase4": {
+      "phase4_01.txt": {
+        "style": "open",
+        "family": "islands",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 118,
+        "wall_ratio": 0.157,
+        "steps": 39,
+        "bomb_used": false
+      },
+      "phase4_02.txt": {
+        "style": "open",
+        "family": "offset",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 113,
+        "wall_ratio": 0.193,
+        "steps": 43,
+        "bomb_used": false
+      },
+      "phase4_03.txt": {
+        "style": "open",
+        "family": "zigzag",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 116,
+        "wall_ratio": 0.171,
+        "steps": 42,
+        "bomb_used": false
+      },
+      "phase4_04.txt": {
+        "style": "open",
+        "family": "spine",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 114,
+        "wall_ratio": 0.186,
+        "steps": 36,
+        "bomb_used": false
+      },
+      "phase4_05.txt": {
+        "style": "open",
+        "family": "spine",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 116,
+        "wall_ratio": 0.171,
+        "steps": 34,
+        "bomb_used": false
+      },
+      "phase4_06.txt": {
+        "style": "compact",
+        "family": "compact_reverse_pull",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 57,
+        "wall_ratio": 0.593,
+        "steps": 43,
+        "bomb_used": false
+      },
+      "phase4_07.txt": {
+        "style": "compact",
+        "family": "compact_reverse_pull",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 43,
+        "wall_ratio": 0.693,
+        "steps": 40,
+        "bomb_used": false
+      },
+      "phase4_08.txt": {
+        "style": "compact",
+        "family": "compact_reverse_pull",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 46,
+        "wall_ratio": 0.671,
+        "steps": 41,
+        "bomb_used": false
+      },
+      "phase4_09.txt": {
+        "style": "compact",
+        "family": "compact_reverse_pull",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 48,
+        "wall_ratio": 0.657,
+        "steps": 43,
+        "bomb_used": false
+      },
+      "phase4_10.txt": {
+        "style": "compact",
+        "family": "compact_reverse_pull",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 50,
+        "wall_ratio": 0.643,
+        "steps": 51,
+        "bomb_used": false
+      }
+    },
+    "phase5": {
+      "phase5_01.txt": {
+        "style": "open",
+        "family": "gadget_b",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 123,
+        "wall_ratio": 0.121,
+        "steps": 48,
+        "bomb_used": true
+      },
+      "phase5_02.txt": {
+        "style": "open",
+        "family": "gadget_c",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 122,
+        "wall_ratio": 0.129,
+        "steps": 35,
+        "bomb_used": true
+      },
+      "phase5_03.txt": {
+        "style": "open",
+        "family": "gadget_a",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 129,
+        "wall_ratio": 0.079,
+        "steps": 35,
+        "bomb_used": true
+      },
+      "phase5_04.txt": {
+        "style": "open",
+        "family": "gadget_d",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 119,
+        "wall_ratio": 0.15,
+        "steps": 33,
+        "bomb_used": true
+      },
+      "phase5_05.txt": {
+        "style": "open",
+        "family": "gadget_d",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 119,
+        "wall_ratio": 0.15,
+        "steps": 31,
+        "bomb_used": true
+      },
+      "phase5_06.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 42,
+        "wall_ratio": 0.7,
+        "steps": 53,
+        "bomb_used": true
+      },
+      "phase5_07.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 49,
+        "wall_ratio": 0.65,
+        "steps": 47,
+        "bomb_used": true
+      },
+      "phase5_08.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 42,
+        "wall_ratio": 0.7,
+        "steps": 49,
+        "bomb_used": true
+      },
+      "phase5_09.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 45,
+        "wall_ratio": 0.679,
+        "steps": 49,
+        "bomb_used": true
+      },
+      "phase5_10.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 49,
+        "wall_ratio": 0.65,
+        "steps": 45,
+        "bomb_used": true
+      }
+    },
+    "phase6": {
+      "phase6_01.txt": {
+        "style": "open",
+        "family": "offset",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 110,
+        "wall_ratio": 0.214,
+        "steps": 47,
+        "bomb_used": false
+      },
+      "phase6_02.txt": {
+        "style": "open",
+        "family": "offset",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 110,
+        "wall_ratio": 0.214,
+        "steps": 47,
+        "bomb_used": false
+      },
+      "phase6_03.txt": {
+        "style": "open",
+        "family": "spine",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 116,
+        "wall_ratio": 0.171,
+        "steps": 54,
+        "bomb_used": false
+      },
+      "phase6_04.txt": {
+        "style": "open",
+        "family": "zigzag",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 115,
+        "wall_ratio": 0.179,
+        "steps": 50,
+        "bomb_used": false
+      },
+      "phase6_05.txt": {
+        "style": "open",
+        "family": "offset",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 108,
+        "wall_ratio": 0.229,
+        "steps": 46,
+        "bomb_used": false
+      },
+      "phase6_06.txt": {
+        "style": "compact",
+        "family": "compact_plain",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 55,
+        "wall_ratio": 0.607,
+        "steps": 41,
+        "bomb_used": false
+      },
+      "phase6_07.txt": {
+        "style": "compact",
+        "family": "compact_plain",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 49,
+        "wall_ratio": 0.65,
+        "steps": 42,
+        "bomb_used": false
+      },
+      "phase6_08.txt": {
+        "style": "compact",
+        "family": "compact_plain",
+        "boxes": 3,
+        "bombs": 0,
+        "open_count": 58,
+        "wall_ratio": 0.586,
+        "steps": 54,
+        "bomb_used": false
+      },
+      "phase6_09.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 40,
+        "wall_ratio": 0.714,
+        "steps": 45,
+        "bomb_used": true
+      },
+      "phase6_10.txt": {
+        "style": "compact",
+        "family": "compact_bomb",
+        "boxes": 2,
+        "bombs": 1,
+        "open_count": 50,
+        "wall_ratio": 0.643,
+        "steps": 49,
+        "bomb_used": true
+      }
+    }
+  },
+  "seed_note": "phase4-6 seed validity is documented in phase456_seed_manifest.json"
+}

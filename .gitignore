@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local agent / temp outputs
+.agent/
+
+# Runtime outputs
+runs/
+tensorboard/
+
+# Scratch notes
+scripts/debug/context.txt
+
+# Temporary generated maps
+assets/maps/**/_tmp*.txt
