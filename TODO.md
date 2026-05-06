@@ -15,10 +15,13 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P1 verify (phase 6 跑中) + P5 Phase1 已达标
-当前任务：等 phase 6 verify 完，串 phase 4/5 verify
-最后一次评估：**phase 1 win=96.14% (2913/3030)** ✓ ≥95% | phase 6 verify 32% pass rate
-最后一次评估时间：2026-05-07 03:55
+当前阶段：P4 联合训练验证跨 phase 迁移
+当前任务：等 phase 4/5 verify + phase 3/6 build, 然后全 phase combined train
+最后一次评估 (combined p1+p2+p6_first_pass, conv h=512, 72K):
+  phase 1: 95.45% ✓ (单 phase: 96.14%, -0.7pp)
+  phase 2: 93.17% (单 phase: 90.30%, **+2.9pp 进步**)
+  phase 6: 13.85% (单 phase:  8.77%, +5.1pp 但仍远低于 90%)
+最后一次评估时间：2026-05-07 04:30
 ```
 
 > **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
