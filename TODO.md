@@ -15,10 +15,10 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P1 — 地图生成器修复
-当前任务：P1.2 (P0/P1.1 已完成)
-最后一次评估：phase6 BC win=9.33% (14/150) | IDA* 老师上限: 50图仅25解 (50%) | 诊断: 无 IDA* 闸 + 步数 vs 推数
-最后一次评估时间：2026-05-07 03:08
+当前阶段：P1 verify (phase 6 跑中) + P5 Phase1 已达标
+当前任务：等 phase 6 verify 完，串 phase 4/5 verify
+最后一次评估：**phase 1 win=96.14% (2913/3030)** ✓ ≥95% | phase 6 verify 32% pass rate
+最后一次评估时间：2026-05-07 03:55
 ```
 
 > **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
@@ -101,6 +101,16 @@ P0 / P1 / P2 是前置工作，可以并行。**P5 通关率 < 90% 时永远走 
 
 > 当前 145 K 纯 FC 不够。把容量花在墙体的卷积上。
 
+- ☑ **P2.1 / P2.2 / P2.3** (2026-05-07)
+  - `experiments/solver_bc/policy_conv.py`: MaskedConvBCPolicy 实现
+    - 架构：walls → Conv2D(1→16, 3x3) → ReLU → Conv2D(16→32, 3x3, stride=2) → ReLU → Flatten(1536) → FC(64) → ReLU → concat 实体 62 维 → FC(256→256→54)
+    - **215 K params**, hidden_dim=256 默认, TFLM 友好（仅 Conv2D / FC / ReLU / Reshape / Concat）
+  - `train_bc.py` 加 `--policy {mlp,conv}` + `--wall-emb-dim`，checkpoint 记录 policy / wall_emb_dim
+  - `evaluate_bc.py` / `branch_search.py` / `self_improve_loop.py` 都按 `payload['policy']` 分派
+  - Bench: bs=512 cuda forward **0.32 ms** ✓ (<5 ms 目标)
+  - 冒烟训练通过 (5 epoch, val_acc 49.5%, 跟 mlp 同样 small dataset 接近)
+
+### 原始方案保留供参考
 - ☐ **P2.1** 在 `experiments/solver_bc/` 下新建 `policy_conv.py`，实现：
   ```
   墙体 16×12 → Conv(1→16, 3×3) → ReLU → Conv(16→32, 3×3) → ReLU
