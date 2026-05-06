@@ -179,6 +179,11 @@ def main() -> int:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--gpu-resident", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument("--policy", choices=["mlp", "conv"], default="mlp",
+                        help="mlp = original MaskedBCPolicy (FC only); "
+                             "conv = MaskedConvBCPolicy (conv over walls + FC trunk)")
+    parser.add_argument("--wall-emb-dim", type=int, default=64,
+                        help="(conv only) 墙体 conv 嵌入维度")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -209,7 +214,24 @@ def main() -> int:
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
 
-    model = MaskedBCPolicy(obs.shape[1], masks.shape[1], args.hidden_dim).to(device)
+    if args.policy == "conv":
+        from experiments.solver_bc.policy_conv import (
+            MaskedConvBCPolicy, summarize_model,
+        )
+        if not include_map_layout:
+            raise ValueError(
+                "--policy conv 需要 obs 包含墙体布局 (include_map_layout=True). "
+                "请用 build_dataset 时带 --include-map-layout (默认开)。"
+            )
+        model = MaskedConvBCPolicy(
+            n_actions=int(masks.shape[1]),
+            hidden_dim=args.hidden_dim,
+            wall_emb_dim=args.wall_emb_dim,
+        ).to(device)
+        print("[train_bc] policy=conv:", summarize_model(model))
+    else:
+        model = MaskedBCPolicy(obs.shape[1], masks.shape[1], args.hidden_dim).to(device)
+        print(f"[train_bc] policy=mlp obs_dim={obs.shape[1]} hidden={args.hidden_dim}")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     use_gpu_resident = should_use_gpu_resident(device, args.gpu_resident, obs, masks, actions)
 
@@ -317,25 +339,25 @@ def main() -> int:
         monitor_loss = val_stats.loss if len(val_idx) > 0 else train_stats.loss
         if monitor_loss < best_val:
             best_val = monitor_loss
-            torch.save(
-                checkpoint_payload(
-                    model.state_dict(),
-                    hidden_dim=args.hidden_dim,
-                    include_map_layout=include_map_layout,
-                    obs_mode=obs_mode,
-                ),
-                os.path.join(args.output_dir, "best.pt"),
+            payload = checkpoint_payload(
+                model.state_dict(),
+                hidden_dim=args.hidden_dim,
+                include_map_layout=include_map_layout,
+                obs_mode=obs_mode,
             )
+            payload["policy"] = args.policy
+            payload["wall_emb_dim"] = args.wall_emb_dim
+            torch.save(payload, os.path.join(args.output_dir, "best.pt"))
 
-    torch.save(
-        checkpoint_payload(
-            model.state_dict(),
-            hidden_dim=args.hidden_dim,
-            include_map_layout=include_map_layout,
-            obs_mode=obs_mode,
-        ),
-        os.path.join(args.output_dir, "last.pt"),
+    last_payload = checkpoint_payload(
+        model.state_dict(),
+        hidden_dim=args.hidden_dim,
+        include_map_layout=include_map_layout,
+        obs_mode=obs_mode,
     )
+    last_payload["policy"] = args.policy
+    last_payload["wall_emb_dim"] = args.wall_emb_dim
+    torch.save(last_payload, os.path.join(args.output_dir, "last.pt"))
 
     summary = {
         "dataset": os.path.abspath(args.dataset),

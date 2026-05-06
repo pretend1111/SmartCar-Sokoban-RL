@@ -23,6 +23,19 @@ from experiments.solver_bc.train_bc import MaskedBCPolicy
 from smartcar_sokoban.rl.train import CURRICULUM, get_map_pool, load_seed_manifest
 
 
+def _build_model_from_payload(payload: dict):
+    policy = str(payload.get("policy", "mlp")).lower()
+    if policy == "conv":
+        from experiments.solver_bc.policy_conv import MaskedConvBCPolicy
+        return MaskedConvBCPolicy(
+            n_actions=int(payload["n_actions"]),
+            hidden_dim=int(payload["hidden_dim"]),
+            wall_emb_dim=int(payload.get("wall_emb_dim", 64)),
+        )
+    return MaskedBCPolicy(payload["obs_dim"], payload["n_actions"],
+                          payload["hidden_dim"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -41,7 +54,7 @@ def main() -> int:
 
     device = resolve_device(args.device)
     payload = torch.load(args.checkpoint, map_location="cpu")
-    model = MaskedBCPolicy(payload["obs_dim"], payload["n_actions"], payload["hidden_dim"])
+    model = _build_model_from_payload(payload)
     model.load_state_dict(payload["model_state"])
     model.to(device)
     model.eval()

@@ -30,7 +30,16 @@ from smartcar_sokoban.rl.train import CURRICULUM, get_map_pool, load_seed_manife
 
 def load_policy(checkpoint: str, device: torch.device) -> Tuple[Dict[str, object], MaskedBCPolicy]:
     payload = torch.load(checkpoint, map_location="cpu")
-    model = MaskedBCPolicy(payload["obs_dim"], payload["n_actions"], payload["hidden_dim"])
+    policy_kind = str(payload.get("policy", "mlp")).lower()
+    if policy_kind == "conv":
+        from experiments.solver_bc.policy_conv import MaskedConvBCPolicy
+        model = MaskedConvBCPolicy(
+            n_actions=int(payload["n_actions"]),
+            hidden_dim=int(payload["hidden_dim"]),
+            wall_emb_dim=int(payload.get("wall_emb_dim", 64)),
+        )
+    else:
+        model = MaskedBCPolicy(payload["obs_dim"], payload["n_actions"], payload["hidden_dim"])
     model.load_state_dict(payload["model_state"])
     model.to(device)
     model.eval()
