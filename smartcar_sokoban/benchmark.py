@@ -87,13 +87,21 @@ def _do_auto(engine, devnull):
 def _do_exact(engine, devnull):
     from smartcar_sokoban.solver.multi_box_solver import MultiBoxSolver
     from smartcar_sokoban.solver.pathfinder import pos_to_grid
+    from smartcar_sokoban.solver.explorer import plan_exploration
 
+    t0 = time.perf_counter()
+
+    # ── Phase 1: 先探索（和 auto 一样，不是上帝视角） ──────
+    with redirect_stdout(devnull):
+        explore_actions = plan_exploration(engine)
+    explore_steps = len(explore_actions)
+
+    # ── Phase 2: 探索完毕后，取当前状态给精确求解器 ────────
     state = engine.get_state()
     boxes = [((int(b.x), int(b.y)), b.class_id) for b in state.boxes]
     targets = {t.num_id: (int(t.x), int(t.y)) for t in state.targets}
     bombs = [(int(b.x), int(b.y)) for b in state.bombs]
 
-    t0 = time.perf_counter()
     solver = MultiBoxSolver(
         grid=state.grid,
         car_pos=pos_to_grid(state.car_x, state.car_y),
@@ -102,15 +110,18 @@ def _do_exact(engine, devnull):
         bombs=bombs,
     )
     with redirect_stdout(devnull):
-        solution = solver.solve(max_cost=1000, time_limit=30.0)
+        solution = solver.solve(max_cost=1000, time_limit=60.0)
     elapsed = time.perf_counter() - t0
 
     if solution is None:
-        return {"won": False, "steps": 0, "time_ms": round(elapsed * 1000, 1),
+        return {"won": False, "steps": explore_steps,
+                "time_ms": round(elapsed * 1000, 1),
                 "solver_used": "exact"}
 
     walk_steps = sum(wc + 1 for _, _, _, wc in solution)
-    return {"won": True, "steps": walk_steps, "pushes": len(solution),
+    total_steps = explore_steps + walk_steps
+    return {"won": True, "steps": total_steps, "pushes": len(solution),
+            "explore_steps": explore_steps, "solve_steps": walk_steps,
             "time_ms": round(elapsed * 1000, 1), "solver_used": "exact"}
 
 

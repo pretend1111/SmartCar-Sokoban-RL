@@ -6,6 +6,7 @@
     3. 远距离扫描: 只要 90° FOV 内无遮挡即可扫描，无需贴近实体
     4. 精准移动: BFS 到最优观察点，最小旋转扫描
     5. 不碰箱子: 箱子/炸弹作为障碍物绕行
+    6. 实时中断: 每步都检查途中 FOV 发现，避免走冤枉路
 """
 
 from __future__ import annotations
@@ -267,16 +268,39 @@ def restore_angle_actions(current_angle: float) -> List[int]:
     return compute_facing_actions(current_angle, ANGLE_UP)
 
 
+# ── 实时排除检查 ──────────────────────────────────────────
+
+def _entity_scan_still_needed(state, etype: str, eidx: int) -> bool:
+    """判断指定实体是否仍需扫描（考虑排除法）.
+
+    排除法: N 个同类实体只需扫 N-1 个.
+    当某类型未扫描数 ≤ 1 时, 最后一个的编号可通过排除法推出,
+    不需要再专门去扫描了.
+    """
+    if etype == 'box':
+        if eidx in state.seen_box_ids:
+            return False  # 已被 FOV 发现
+        unseen_count = len(state.boxes) - len(state.seen_box_ids)
+        return unseen_count >= 2  # 未扫 ≥ 2 才还需要继续扫
+    elif etype == 'target':
+        if eidx in state.seen_target_ids:
+            return False
+        unseen_count = len(state.targets) - len(state.seen_target_ids)
+        return unseen_count >= 2
+    return False
+
+
 # ── 主探索流程 ─────────────────────────────────────────────
 
 def plan_exploration(engine) -> List[int]:
-    """高效探索: 排除法 + BFS 精准移动 + 最小旋转.
+    """高效探索: 排除法 + BFS 精准移动 + 最小旋转 + 实时中断.
 
     策略:
     1. 获取需要扫描的实体列表（排除法：跳过最远的）
     2. 贪心选最近的，BFS 走到观察点
-    3. 仅在观察时最小旋转面向实体
-    4. 每扫完一个重新评估（可能触发更多排除）
+    3. 每走一步都检查: 途中 FOV 是否已发现目标或触发排除法
+       → 是: 立即中断当前路径, 重新评估
+    4. 仅在观察时最小旋转面向实体
     5. 直到排除法可以确定所有配对
     """
     all_actions: List[int] = []
@@ -334,26 +358,41 @@ def plan_exploration(engine) -> List[int]:
                 best_actions_list = (path, face_angle)
 
         if best_entity is None:
-            # 兜底: 360° 扫描
+            # 兜底: 360° 扫描, 每步也检查
             for _ in range(8):
                 state = engine.discrete_step(5)
                 all_actions.append(5)
+                if exploration_complete(state):
+                    break
             continue
 
         ex, ey, etype, eidx = best_entity
         path, face_angle = best_actions_list
 
         # 1) 移动到观察点
+        #    每步检查: 当前目标是否已被途中 FOV 发现或排除法不再需要
+        #    注意: 不在走路时检查 exploration_complete,
+        #    因为中断走路会把车扔在路中间（远离实体的坏位置）,
+        #    导致后续求解器搜索空间爆炸. 走完路到观察点后,
+        #    外层 while 循环的 exploration_complete 自然会终止.
         for dx, dy in path:
             a = direction_to_action(dx, dy)
             state = engine.discrete_step(a)
             all_actions.append(a)
 
-        # 2) 旋转面向实体
+        # 走完路或提前中断后, 检查是否还需要旋转
+        if exploration_complete(state):
+            continue
+        if not _entity_scan_still_needed(state, etype, eidx):
+            continue  # 回到 while 循环重新选目标
+
+        # 2) 旋转面向实体 —— 旋转时也检查
         face_acts = compute_facing_actions(state.car_angle, face_angle)
         for a in face_acts:
             state = engine.discrete_step(a)
             all_actions.append(a)
+            if exploration_complete(state):
+                break
 
     # 报告结果
     unseen_b = len(state.boxes) - len(state.seen_box_ids)

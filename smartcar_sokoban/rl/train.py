@@ -18,6 +18,7 @@ import argparse
 import glob
 import os
 import random
+import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -26,6 +27,9 @@ import numpy as np
 
 from smartcar_sokoban.rl.high_level_env import SokobanHLEnv, STATE_DIM_WITH_MAP
 from smartcar_sokoban.paths import MAPS_ROOT, PROJECT_ROOT, RUNS_ROOT
+from smartcar_sokoban.solver.offline_teacher_cache import (
+    build_offline_teacher_cache,
+)
 
 
 # ── 种子清单 ──────────────────────────────────────────
@@ -144,6 +148,20 @@ CURRICULUM = {
     },
 }
 
+TEACHER_PRIMARY_REWARD = 0.5
+TEACHER_CANDIDATE_REWARD = 0.2
+TEACHER_MISMATCH_PENALTY = 0.05
+TEACHER_MAX_COST = 300
+TEACHER_TIME_LIMIT = 0.2
+OFFLINE_TEACHER_PHASE_START = 3
+OFFLINE_TEACHER_BUILD_TIME_LIMIT = 0.5
+OFFLINE_TEACHER_SEEDS_PER_MAP = {
+    3: 24,
+    4: 24,
+    5: 32,
+    6: 32,
+}
+
 
 def get_map_pool(phase_cfg: dict) -> List[str]:
     """获取某阶段的地图池."""
@@ -164,7 +182,14 @@ class WeightedMapEnv(SokobanHLEnv):
 
     def __init__(self, map_pool, baselines, seed_manifest=None,
                  weak_maps=None, base_dir="", max_steps=60,
-                 include_map_layout=False):
+                 include_map_layout=False,
+                 teacher_primary_reward=TEACHER_PRIMARY_REWARD,
+                 teacher_candidate_reward=TEACHER_CANDIDATE_REWARD,
+                 teacher_mismatch_penalty=TEACHER_MISMATCH_PENALTY,
+                 teacher_max_cost=TEACHER_MAX_COST,
+                 teacher_time_limit=TEACHER_TIME_LIMIT,
+                 teacher_offline_cache_path=None,
+                 teacher_online_fallback=True):
         avg_baseline = int(np.mean(list(baselines.values()))) if baselines else 100
         super().__init__(
             map_pool=map_pool,
@@ -173,6 +198,13 @@ class WeightedMapEnv(SokobanHLEnv):
             baseline_steps=avg_baseline,
             seed_manifest=seed_manifest or {},
             include_map_layout=include_map_layout,
+            teacher_primary_reward=teacher_primary_reward,
+            teacher_candidate_reward=teacher_candidate_reward,
+            teacher_mismatch_penalty=teacher_mismatch_penalty,
+            teacher_max_cost=teacher_max_cost,
+            teacher_time_limit=teacher_time_limit,
+            teacher_offline_cache_path=teacher_offline_cache_path,
+            teacher_online_fallback=teacher_online_fallback,
         )
         self.baselines = baselines
         self.weak_maps = weak_maps or []
@@ -186,6 +218,31 @@ class WeightedMapEnv(SokobanHLEnv):
         # 更新 baseline_steps 为当前选择地图的基线
         self.baseline_steps = self.baselines.get(chosen, 100)
         return chosen
+
+
+def prepare_phase_teacher_cache(phase: int,
+                                phase_cfg: dict,
+                                map_pool: List[str],
+                                seed_manifest: Dict[str, List[int]]) -> str:
+    cache_dir = RUNS_ROOT / "rl" / "teacher_cache"
+    cache_path = cache_dir / f"phase{phase}_exact_teacher.pkl.gz"
+    seeds_per_map = OFFLINE_TEACHER_SEEDS_PER_MAP.get(phase, 16)
+
+    print("  预生成 exact teacher 离线缓存...")
+    build_offline_teacher_cache(
+        cache_path=cache_path,
+        map_pool=map_pool,
+        seed_manifest=seed_manifest,
+        max_steps=phase_cfg['max_steps'],
+        base_dir=str(PROJECT_ROOT),
+        phase_name=phase_cfg['name'],
+        seeds_per_map=seeds_per_map,
+        max_cost=TEACHER_MAX_COST,
+        time_limit=OFFLINE_TEACHER_BUILD_TIME_LIMIT,
+        strategy="auto",
+    )
+    print(f"  Teacher cache: {cache_path}")
+    return str(cache_path)
 
 
 # ── 训练 ──────────────────────────────────────────────────
@@ -391,12 +448,25 @@ def train(start_phase: int = 1, resume_path: Optional[str] = None,
         avg_bl = int(np.mean(list(baselines.values())))
         print(f"  平均基线: {avg_bl} 步")
 
+        teacher_offline_cache_path = None
+        teacher_online_fallback = True
+        teacher_time_limit = TEACHER_TIME_LIMIT
+        if phase >= OFFLINE_TEACHER_PHASE_START:
+            teacher_offline_cache_path = prepare_phase_teacher_cache(
+                phase, cfg, map_pool, seed_manifest
+            )
+            teacher_online_fallback = False
+            teacher_time_limit = 0.0
+
         # ── 环境工厂 (SubprocVecEnv 需要可 pickle 的工厂) ──
         # 用闭包捕获当前 phase 的变量
         _mp = list(map_pool)
         _bl = dict(baselines)
         _sm = dict(seed_manifest)
         _ms = cfg['max_steps']
+        _teacher_cache_path = teacher_offline_cache_path
+        _teacher_online_fallback = teacher_online_fallback
+        _teacher_time_limit = teacher_time_limit
 
         def _make_env_fn(rank):
             """返回一个环境工厂函数 (闭包)."""
@@ -408,6 +478,9 @@ def train(start_phase: int = 1, resume_path: Optional[str] = None,
                     base_dir=str(PROJECT_ROOT),
                     max_steps=_ms,
                     include_map_layout=True,
+                    teacher_time_limit=_teacher_time_limit,
+                    teacher_offline_cache_path=_teacher_cache_path,
+                    teacher_online_fallback=_teacher_online_fallback,
                 )
                 return ActionMasker(env, lambda e: e.action_masks())
             return _init

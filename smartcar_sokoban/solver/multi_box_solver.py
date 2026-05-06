@@ -490,7 +490,7 @@ class MultiBoxSolver:
 
     def _car_bfs_all(self, start: Pos, grid,
                      occupied: Set[Pos]) -> Dict[Pos, int]:
-        """车从 start 出发到所有可达空地的最短步数."""
+        """车从 start 出发到所有可达空地的最短步数 (仅上下左右)."""
         visited = {start}
         dist: Dict[Pos, int] = {start: 0}
         queue = deque([start])
@@ -498,7 +498,7 @@ class MultiBoxSolver:
         while queue:
             c, r = queue.popleft()
             d = dist[(c, r)]
-            for dc, dr in DIRS_8:
+            for dc, dr in DIRS:
                 nc, nr = c + dc, r + dr
                 if ((nc, nr) not in visited and
                         self._can_step(grid, (c, r), (dc, dr)) and
@@ -514,7 +514,7 @@ class MultiBoxSolver:
     def _car_bfs_path(self, start: Pos, goal: Pos,
                       grid, occupied: Set[Pos]
                       ) -> Optional[List[Dir]]:
-        """车的 BFS, 返回方向列表."""
+        """车的 BFS, 返回方向列表 (仅上下左右)."""
         if start == goal:
             return []
         if goal in occupied:
@@ -525,7 +525,7 @@ class MultiBoxSolver:
 
         while queue:
             (c, r), path = queue.popleft()
-            for dc, dr in DIRS_8:
+            for dc, dr in DIRS:
                 nc, nr = c + dc, r + dr
                 new_path = path + [(dc, dr)]
                 if (nc, nr) == goal:
@@ -893,11 +893,25 @@ class MultiBoxSolver:
             推操作列表 [(etype, eid, direction, walk_cost), ...]
             或 None 无解/超时
         """
+        t0_global = time.perf_counter()
+        time_limit = max(0.01, float(time_limit))
+        use_ida_fallback = strategy == "auto" and time_limit >= 2.0
+
         if strategy in ("auto", "best_first"):
+            # Respect the caller's budget. Online teacher queries rely on
+            # tight per-state limits and should not be expanded silently.
+            bf_limit = time_limit if not use_ida_fallback else time_limit * 0.5
             result = self._solve_best_first(max_cost=max_cost,
-                                            time_limit=time_limit)
-            if result is not None or strategy == "best_first":
+                                            time_limit=bf_limit)
+            if result is not None or strategy == "best_first" or not use_ida_fallback:
                 return result
+
+        # IDA* 用剩余时间
+        elapsed = time.perf_counter() - t0_global
+        remaining = time_limit - elapsed
+        if remaining < 2.0:
+            print(f"  IDA*: 剩余时间不足 ({remaining:.1f}s)")
+            return None
 
         h0 = self._heuristic(self.initial)
         if h0 >= 999999:
@@ -913,7 +927,7 @@ class MultiBoxSolver:
 
         self.nodes = 0
         self._t0 = time.perf_counter()
-        self._time_limit = time_limit
+        self._time_limit = remaining
         self._timed_out = False
         self._transposition: Dict[MBState, int] = {}  # state → best g
         bound = h0

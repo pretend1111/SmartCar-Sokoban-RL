@@ -6,6 +6,7 @@ import numpy as np
 
 from smartcar_sokoban.rl.high_level_env import (
     DIR_DELTAS,
+    BOMB_DIR_DELTAS,
     MAP_COLS,
     MAP_ROWS,
     MAX_BOMBS,
@@ -13,17 +14,20 @@ from smartcar_sokoban.rl.high_level_env import (
     MAX_TARGETS,
     N_ACTIONS,
     N_DIRS,
+    N_BOMB_DIRS,
     PUSH_BOMB_START,
     PUSH_BOX_START,
     STATE_DIM,
     STATE_DIM_WITH_MAP,
 )
 from smartcar_sokoban.solver.multi_box_solver import MultiBoxSolver
+from smartcar_sokoban.solver.pathfinder import pos_to_grid
 
 Pos = Tuple[int, int]
 SolverMove = Tuple[str, object, Tuple[int, int], int]
 
 DIR_TO_INDEX = {delta: idx for idx, delta in enumerate(DIR_DELTAS)}
+BOMB_DIR_TO_INDEX = {delta: idx for idx, delta in enumerate(BOMB_DIR_DELTAS)}
 
 
 def encode_wall_layout(grid: List[List[int]]) -> List[float]:
@@ -108,10 +112,10 @@ def build_oracle_obs(state, step_count: int, max_steps: int,
 
 
 def build_solver_from_state(state) -> MultiBoxSolver:
-    boxes = [((int(box.x), int(box.y)), box.class_id) for box in state.boxes]
-    targets = {target.num_id: (int(target.x), int(target.y)) for target in state.targets}
-    bombs = [(int(bomb.x), int(bomb.y)) for bomb in state.bombs]
-    car = (int(state.car_x), int(state.car_y))
+    boxes = [(pos_to_grid(box.x, box.y), box.class_id) for box in state.boxes]
+    targets = {target.num_id: pos_to_grid(target.x, target.y) for target in state.targets}
+    bombs = [pos_to_grid(bomb.x, bomb.y) for bomb in state.bombs]
+    car = pos_to_grid(state.car_x, state.car_y)
     return MultiBoxSolver(state.grid, car, boxes, targets, bombs)
 
 
@@ -124,15 +128,18 @@ def map_solver_move_to_env_action(state, move: SolverMove) -> Optional[int]:
     if entity_type == "box":
         old_pos, class_id = entity_id
         for idx, box in enumerate(state.boxes):
-            if (int(box.x), int(box.y)) == old_pos and box.class_id == class_id:
+            if pos_to_grid(box.x, box.y) == old_pos and box.class_id == class_id:
                 return PUSH_BOX_START + idx * N_DIRS + dir_idx
         return None
 
     if entity_type == "bomb":
         old_pos = entity_id
+        dir_idx = BOMB_DIR_TO_INDEX.get(direction)
+        if dir_idx is None:
+            return None
         for idx, bomb in enumerate(state.bombs):
-            if (int(bomb.x), int(bomb.y)) == old_pos:
-                return PUSH_BOMB_START + idx * N_DIRS + dir_idx
+            if pos_to_grid(bomb.x, bomb.y) == old_pos:
+                return PUSH_BOMB_START + idx * N_BOMB_DIRS + dir_idx
         return None
 
     return None

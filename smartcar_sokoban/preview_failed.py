@@ -61,26 +61,39 @@ def directions_to_discrete_actions(directions):
 
 
 def solve_exact(engine):
+    from smartcar_sokoban.solver.explorer import plan_exploration
+
+    # ── Phase 1: 先探索（和 auto 一样，不是上帝视角） ──────
+    explore_actions = plan_exploration(engine)
+    print(f"    探索完成, {len(explore_actions)} 步")
+
+    # ── Phase 2: 探索完毕后，取当前状态给精确求解器 ────────
     state = engine.get_state()
     boxes = [((int(box.x), int(box.y)), box.class_id) for box in state.boxes]
     targets = {target.num_id: (int(target.x), int(target.y)) for target in state.targets}
     bombs = [(int(bomb.x), int(bomb.y)) for bomb in state.bombs]
+    car_pos = pos_to_grid(state.car_x, state.car_y)
+    print(f"    车位={car_pos}, {len(boxes)}箱 {len(targets)}目标 {len(bombs)}炸弹")
+
     solver = MultiBoxSolver(
         grid=state.grid,
-        car_pos=pos_to_grid(state.car_x, state.car_y),
+        car_pos=car_pos,
         boxes=boxes,
         targets=targets,
         bombs=bombs,
     )
-    devnull = io.StringIO()
-    with redirect_stdout(devnull):
-        solution = solver.solve(max_cost=1000, time_limit=12.0)
+    solution = solver.solve(max_cost=1000, time_limit=60.0)
     if solution is None:
+        print("    ❌ MultiBoxSolver 无解")
         return None
     directions = solver.solution_to_actions(solution)
-    actions = directions_to_discrete_actions(directions)
-    steps = sum(wc + 1 for _, _, _, wc in solution)
-    return actions, steps
+    # 合并探索动作 + 求解动作 (探索结束后车已在网格上，无需再 snap)
+    solve_actions = [direction_to_action(dx, dy) for dx, dy in directions]
+    all_actions = list(explore_actions) + solve_actions
+    solve_steps = sum(wc + 1 for _, _, _, wc in solution)
+    total_steps = len(explore_actions) + solve_steps
+    print(f"    ✅ 求解成功: 探索{len(explore_actions)}步 + 求解{solve_steps}步 = 总{total_steps}步")
+    return all_actions, total_steps
 
 
 def lerp_state(prev: GameState, cur: GameState, t: float) -> GameState:

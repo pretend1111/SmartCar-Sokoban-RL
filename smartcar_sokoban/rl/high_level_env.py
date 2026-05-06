@@ -17,8 +17,10 @@ v2 改动:
 
 from __future__ import annotations
 
-import copy
+import contextlib
+import io
 import math
+import os
 import random
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -35,6 +37,14 @@ from smartcar_sokoban.solver.explorer import (
     find_observation_point, get_entity_obstacles, get_all_entity_positions,
     direction_to_action, compute_facing_actions, exploration_complete,
 )
+from smartcar_sokoban.solver.high_level_teacher import (
+    TeacherAdvice,
+    advise_exact_high_level,
+)
+from smartcar_sokoban.solver.offline_teacher_cache import (
+    load_offline_teacher_cache_bundle,
+    normalize_map_key,
+)
 
 # ── 常量 ──────────────────────────────────────────────────
 
@@ -49,13 +59,18 @@ DIR_LEFT = 2   # (-1, 0)
 DIR_RIGHT = 3  # (+1, 0)
 DIR_DELTAS = [(0, -1), (0, 1), (-1, 0), (1, 0)]
 N_DIRS = 4
+BOMB_DIR_DELTAS = [
+    (0, -1), (0, 1), (-1, 0), (1, 0),
+    (-1, -1), (1, -1), (-1, 1), (1, 1),
+]
+N_BOMB_DIRS = len(BOMB_DIR_DELTAS)
 
 # 动作区间
 EXPLORE_BOX_START = 0                                          # 0..4
 EXPLORE_TGT_START = MAX_BOXES                                  # 5..9
 PUSH_BOX_START = MAX_BOXES + MAX_TARGETS                       # 10..29
-PUSH_BOMB_START = PUSH_BOX_START + MAX_BOXES * N_DIRS          # 30..41
-N_ACTIONS = PUSH_BOMB_START + MAX_BOMBS * N_DIRS               # 42
+PUSH_BOMB_START = PUSH_BOX_START + MAX_BOXES * N_DIRS          # 30..53
+N_ACTIONS = PUSH_BOMB_START + MAX_BOMBS * N_BOMB_DIRS          # 54
 
 # 地图尺寸在当前数据集中固定为 16x12.
 MAP_COLS = 16
@@ -92,7 +107,16 @@ class SokobanHLEnv(gym.Env):
                  max_steps: int = 60,
                  baseline_steps: Optional[int] = None,
                  seed_manifest: Optional[Dict] = None,
-                 include_map_layout: bool = False):
+                 include_map_layout: bool = False,
+                 teacher_primary_reward: float = 0.0,
+                 teacher_candidate_reward: float = 0.0,
+                 teacher_mismatch_penalty: float = 0.0,
+                 teacher_max_cost: int = 300,
+                 teacher_time_limit: float = 0.0,
+                 teacher_strategy: str = "auto",
+                 teacher_cache_size: int = 4096,
+                 teacher_offline_cache_path: Optional[str] = None,
+                 teacher_online_fallback: bool = True):
         """
         Args:
             map_file:       单张地图路径
@@ -113,6 +137,15 @@ class SokobanHLEnv(gym.Env):
         self.include_map_layout = include_map_layout
         self.state_dim = (STATE_DIM_WITH_MAP if include_map_layout
                           else STATE_DIM)
+        self.teacher_primary_reward = teacher_primary_reward
+        self.teacher_candidate_reward = teacher_candidate_reward
+        self.teacher_mismatch_penalty = teacher_mismatch_penalty
+        self.teacher_max_cost = teacher_max_cost
+        self.teacher_time_limit = teacher_time_limit
+        self.teacher_strategy = teacher_strategy
+        self.teacher_cache_size = max(int(teacher_cache_size), 0)
+        self.teacher_offline_cache_path = teacher_offline_cache_path
+        self.teacher_online_fallback = teacher_online_fallback
 
         # 引擎
         cfg = GameConfig()
@@ -142,6 +175,19 @@ class SokobanHLEnv(gym.Env):
         self._target_reachable_cells: Dict[int, Set[Tuple[int, int]]] = {}
         self._cached_deadlock_grid_sig: Optional[Tuple[int, ...]] = None
         self._cached_deadlock_target_sig: Optional[Tuple[Any, ...]] = None
+        self._teacher_cache: Dict[Tuple[Any, ...], TeacherAdvice] = {}
+        self._offline_teacher_cache: Dict[str, Dict[Tuple[Any, ...], TeacherAdvice]] = {}
+        self._current_offline_teacher: Dict[Tuple[Any, ...], TeacherAdvice] = {}
+        self._last_teacher_action: Optional[int] = None
+        self._last_teacher_reward = 0.0
+        self._last_teacher_source = ""
+        self._last_teacher_plan_cost: Optional[int] = None
+
+        if self.teacher_offline_cache_path:
+            bundle = load_offline_teacher_cache_bundle(
+                self.teacher_offline_cache_path
+            )
+            self._offline_teacher_cache = bundle.get("maps", {})
 
     # ══════════════════════════════════════════════════════
     #  Gym 接口
@@ -152,6 +198,10 @@ class SokobanHLEnv(gym.Env):
 
         # 选地图 + 可用种子
         self._current_map = self._pick_map()
+        self._current_offline_teacher = self._offline_teacher_cache.get(
+            normalize_map_key(self._current_map),
+            {},
+        )
         map_seed = self._pick_seed(self._current_map, seed)
         random.seed(map_seed)
         self.engine.reset(self._current_map)
@@ -174,6 +224,10 @@ class SokobanHLEnv(gym.Env):
         self._cached_deadlock_grid_sig = None
         self._cached_deadlock_target_sig = None
         self._target_reachable_cells.clear()
+        self._last_teacher_action = None
+        self._last_teacher_reward = 0.0
+        self._last_teacher_source = ""
+        self._last_teacher_plan_cost = None
         state_sig = self._state_signature(state)
         self._state_visit_counts[state_sig] = 1
         self._recent_state_sigs = [state_sig]
@@ -192,6 +246,7 @@ class SokobanHLEnv(gym.Env):
 
         # 记录推箱前每个箱子到目标的距离 (用于距离塑形)
         dists_before = self._compute_box_distances(state_before)
+        teacher_advice = self._get_teacher_advice(state_before)
 
         # 执行动作
         steps, success = self._execute_action(action)
@@ -250,6 +305,9 @@ class SokobanHLEnv(gym.Env):
         if not success:
             reward -= 2.0
 
+        teacher_reward = self._score_teacher_action(teacher_advice, action)
+        reward += teacher_reward
+
         state_sig = self._state_signature(state_after)
         revisit_count = self._state_visit_counts.get(state_sig, 0) + 1
         self._state_visit_counts[state_sig] = revisit_count
@@ -304,6 +362,14 @@ class SokobanHLEnv(gym.Env):
         self._last_progress_made = progress_made
         self._last_truncation_reason = truncated_reason
         self._last_action = action
+        self._last_teacher_action = (
+            teacher_advice.primary_action if teacher_advice else None
+        )
+        self._last_teacher_reward = teacher_reward
+        self._last_teacher_source = teacher_advice.source if teacher_advice else ""
+        self._last_teacher_plan_cost = (
+            teacher_advice.estimated_remaining_cost if teacher_advice else None
+        )
         self._recent_state_sigs.append(state_sig)
         if len(self._recent_state_sigs) > OSCILLATION_LOOKBACK:
             self._recent_state_sigs.pop(0)
@@ -312,6 +378,10 @@ class SokobanHLEnv(gym.Env):
         info = self._build_info()
         info['low_level_steps'] = steps
         info['subtask_success'] = success
+        info['teacher_action'] = self._last_teacher_action
+        info['teacher_reward'] = self._last_teacher_reward
+        info['teacher_source'] = self._last_teacher_source
+        info['teacher_plan_cost'] = self._last_teacher_plan_cost
 
         return obs, reward, terminated, truncated, info
 
@@ -476,8 +546,8 @@ class SokobanHLEnv(gym.Env):
             bc, br = pos_to_grid(state.bombs[i].x, state.bombs[i].y)
             push_obstacles = entity_set
             reachable = get_reachable(car_grid, grid, push_obstacles)
-            for d in range(N_DIRS):
-                dx, dy = DIR_DELTAS[d]
+            for d in range(N_BOMB_DIRS):
+                dx, dy = BOMB_DIR_DELTAS[d]
                 nbx, nby = bc + dx, br + dy
                 car_pos = (bc - dx, br - dy)
 
@@ -491,7 +561,7 @@ class SokobanHLEnv(gym.Env):
                     continue
                 if self.engine._build_push_chain('bomb', i, dx, dy) is None:
                     continue
-                action_idx = PUSH_BOMB_START + i * N_DIRS + d
+                action_idx = PUSH_BOMB_START + i * N_BOMB_DIRS + d
                 fallback_actions.append(action_idx)
                 if self._push_signature('bomb', (bc, br), d) in self._failed_pushes:
                     continue
@@ -533,8 +603,8 @@ class SokobanHLEnv(gym.Env):
 
         elif PUSH_BOMB_START <= action < N_ACTIONS:
             offset = action - PUSH_BOMB_START
-            bomb_idx = offset // N_DIRS
-            dir_idx = offset % N_DIRS
+            bomb_idx = offset // N_BOMB_DIRS
+            dir_idx = offset % N_BOMB_DIRS
             return self._execute_single_push(bomb_idx, dir_idx, 'bomb')
 
         return 0, False
@@ -616,7 +686,10 @@ class SokobanHLEnv(gym.Env):
             ex, ey = state.bombs[entity_idx].x, state.bombs[entity_idx].y
 
         ec, er = pos_to_grid(ex, ey)
-        dx, dy = DIR_DELTAS[dir_idx]
+        dir_deltas = DIR_DELTAS if etype == 'box' else BOMB_DIR_DELTAS
+        if not (0 <= dir_idx < len(dir_deltas)):
+            return 0, False
+        dx, dy = dir_deltas[dir_idx]
         push_sig = self._push_signature(etype, (ec, er), dir_idx)
 
         # 车需要站在实体的反方向
@@ -682,6 +755,79 @@ class SokobanHLEnv(gym.Env):
     # ══════════════════════════════════════════════════════
     #  辅助方法
     # ══════════════════════════════════════════════════════
+
+    def _teacher_enabled(self) -> bool:
+        has_reward = (
+            self.teacher_primary_reward > 0.0 or
+            self.teacher_candidate_reward > 0.0 or
+            self.teacher_mismatch_penalty > 0.0
+        )
+        return (
+            has_reward and (
+                bool(self._current_offline_teacher) or
+                (self.teacher_online_fallback and self.teacher_time_limit > 0.0)
+            )
+        )
+
+    def _teacher_signature(self, state) -> Tuple[Any, ...]:
+        angle_bucket = int(round(state.car_angle / (math.pi / 4))) % 8
+        return (
+            self._state_signature(state),
+            angle_bucket,
+            tuple(sorted(state.seen_box_ids)),
+            tuple(sorted(state.seen_target_ids)),
+        )
+
+    def _get_teacher_advice(self, state) -> Optional[TeacherAdvice]:
+        if not self._teacher_enabled():
+            return None
+
+        sig = self._teacher_signature(state)
+        cached = self._teacher_cache.get(sig)
+        if cached is not None:
+            return cached
+
+        offline = self._current_offline_teacher.get(sig)
+        if offline is not None:
+            advice = TeacherAdvice(
+                primary_action=offline.primary_action,
+                candidate_actions=tuple(offline.candidate_actions),
+                source=f"{offline.source}_offline",
+                estimated_remaining_cost=offline.estimated_remaining_cost,
+            )
+            self._remember_teacher_advice(sig, advice)
+            return advice
+
+        if self.teacher_time_limit <= 0.0 or not self.teacher_online_fallback:
+            return None
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            advice = advise_exact_high_level(
+                state,
+                max_cost=self.teacher_max_cost,
+                time_limit=self.teacher_time_limit,
+                strategy=self.teacher_strategy,
+            )
+        self._remember_teacher_advice(sig, advice)
+        return advice
+
+    def _remember_teacher_advice(self, sig: Tuple[Any, ...],
+                                 advice: TeacherAdvice) -> None:
+        if self.teacher_cache_size <= 0:
+            return
+        if len(self._teacher_cache) >= self.teacher_cache_size:
+            self._teacher_cache.pop(next(iter(self._teacher_cache)))
+        self._teacher_cache[sig] = advice
+
+    def _score_teacher_action(self, advice: Optional[TeacherAdvice],
+                              action: int) -> float:
+        if advice is None or advice.primary_action is None:
+            return 0.0
+        if action == advice.primary_action:
+            return self.teacher_primary_reward
+        if action in advice.candidate_actions:
+            return self.teacher_candidate_reward
+        return -self.teacher_mismatch_penalty
 
     def _pick_map(self) -> str:
         if self.map_pool:
@@ -932,4 +1078,8 @@ class SokobanHLEnv(gym.Env):
             'progress_made': self._last_progress_made,
             'state_revisit_count': self._last_state_revisit_count,
             'truncated_reason': self._last_truncation_reason,
+            'teacher_action': self._last_teacher_action,
+            'teacher_reward': self._last_teacher_reward,
+            'teacher_source': self._last_teacher_source,
+            'teacher_plan_cost': self._last_teacher_plan_cost,
         }

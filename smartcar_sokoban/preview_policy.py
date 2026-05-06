@@ -38,6 +38,7 @@ from smartcar_sokoban.rl.high_level_env import (
     MAX_BOXES,
     MAX_TARGETS,
     N_DIRS,
+    N_BOMB_DIRS,
     PUSH_BOX_START,
     PUSH_BOMB_START,
     SokobanHLEnv,
@@ -63,6 +64,17 @@ DIR_NAMES = {
     DIR_DOWN: "DOWN",
     DIR_LEFT: "LEFT",
     DIR_RIGHT: "RIGHT",
+}
+
+BOMB_DIR_NAMES = {
+    0: "UP",
+    1: "DOWN",
+    2: "LEFT",
+    3: "RIGHT",
+    4: "UP_LEFT",
+    5: "UP_RIGHT",
+    6: "DOWN_LEFT",
+    7: "DOWN_RIGHT",
 }
 
 
@@ -106,9 +118,9 @@ def action_name(action: int) -> str:
         dir_idx = offset % N_DIRS
         return f"PUSH_BOX[{box_idx}]_{DIR_NAMES.get(dir_idx, dir_idx)}"
     offset = action - PUSH_BOMB_START
-    bomb_idx = offset // N_DIRS
-    dir_idx = offset % N_DIRS
-    return f"PUSH_BOMB[{bomb_idx}]_{DIR_NAMES.get(dir_idx, dir_idx)}"
+    bomb_idx = offset // N_BOMB_DIRS
+    dir_idx = offset % N_BOMB_DIRS
+    return f"PUSH_BOMB[{bomb_idx}]_{BOMB_DIR_NAMES.get(dir_idx, dir_idx)}"
 
 
 def choose_seed(map_name: str, seed_manifest: Dict[str, List[int]], seed: Optional[int]) -> int:
