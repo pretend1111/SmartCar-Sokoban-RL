@@ -123,7 +123,12 @@ def _resolve_rollout_backend(
     if backend not in {"auto", "cpu", "gpu"}:
         raise ValueError(f"unknown rollout backend: {rollout_backend}")
     if backend == "auto":
-        return "gpu" if device.type == "cuda" else "cpu"
+        # NOTE: experiments/gpu_sim/gpu_push_env 的 BOMB_ACTION_* /
+        # PUSH_ACTION_IS_BOX / failed_bomb_push 等在 N_BOMB_DIRS=8 下
+        # (含对角推炸弹) 还是按 N_DIRS=4 索引, 跟当前 54 维动作空间不兼容,
+        # 调用会 RuntimeError. 修这个要重排 bomb 维度, 暂搁置;
+        # 这里把 auto 默认退回 CPU rollout 保证可用.
+        return "cpu"
     return backend
 
 
