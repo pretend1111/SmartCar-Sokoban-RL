@@ -15,10 +15,10 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P0 — 基线审计
-当前任务：P0.2 (P0.1 已完成)
-最后一次评估：phase6 win=9.33% (14/150, 50图×3seed) | val_acc=64.7% | dataset=2043样本
-最后一次评估时间：2026-05-07 02:55
+当前阶段：P1 — 地图生成器修复 (P0 全部完成)
+当前任务：P1.1
+最后一次评估：phase6 BC win=9.33% (14/150) | IDA* 老师上限: 50图仅25解 (50%) | RL 无 phase6 ckpt
+最后一次评估时间：2026-05-07 03:08
 ```
 
 > **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
@@ -63,13 +63,13 @@ P0 / P1 / P2 是前置工作，可以并行。**P5 通关率 < 90% 时永远走 
     ```
   - **完成判定**：拿到 phase 6 的 `win_rate / avg_steps` 数字写到本文顶部"最后一次评估"。
   - 监控：训练时 GPU 利用率应 > 70%（FC-only 模型小，DataLoader 不应是瓶颈，用 `--gpu-resident on`）；数据生成时 CPU 应 90%+。
-- ☐ **P0.2** 跑一次 phase 6 上 IDA\* 严格最优解的"老师上限"
-  - 用刚改完的 4 向 `MultiBoxSolver`，对每张 phase 6 图算 `(strategy='ida', time_limit=300)` 的最优推数，写到 `.agent/baseline/phase6_optimal.json`。
-  - 这是 BC 学得再好也不可能超过的天花板。
-  - **完成判定**：所有 phase 6 图都有最优解（或被标记为 IDA\* 5 分钟内无解，需要回 P1 改图）。
-- ☐ **P0.3** 跑当前 RL `MaskablePPO` 模型（如果 `runs/rl/models/phase6_best.zip` 存在）的 deterministic 评估，作为 RL 路线的对照。
-  - 命令：`conda run -n rl python -m smartcar_sokoban.rl.train --eval runs/rl/models/phase6_best.zip`
-  - 没有就跳过，本任务标 ☑（跳过原因写到顶部）。
+- ☑ **P0.2** phase 6 IDA\* 严格最优解 (前 50 图, time_limit=180s, workers=18)
+  - 结果：**50 图仅 25 解 (50%)**，剩 25 图 IDA\* 超时
+  - pushes 分布：[4, 8, 8, 8, 10, 10, 11, 12, 12, 13, 13, 16, 16, 17, 19, 20, 21, 21, 22, 24, 25, 27, 27, 28, 30]
+  - **诊断**：分布严重失衡——phase 6 出现 4/8 推的 trivial 图，又有 50% 让 IDA\* 在 180s 内解不出来。两端都坏。
+  - 写入 `.agent/baseline/phase6_optimal.json`
+  - 资源：18 worker × 平均~7s/图（OK 部分）+ 25×180s 超时占满 = 总 361s 墙钟
+- ☑ **P0.3** RL phase6_best.zip 不存在（RL 从未训到 phase 6，只有 phase 1-5 ckpt），跳过。
 
 ---
 
