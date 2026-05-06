@@ -14,19 +14,18 @@ if ROOT not in sys.path:
 
 from smartcar_sokoban.config import GameConfig
 from smartcar_sokoban.engine import GameEngine
-from experiments.solver_bc.oracle_features import (
-    DIR_TO_INDEX,
-    build_solver_from_state,
-    map_solver_move_to_env_action,
-)
-from smartcar_sokoban.rl.high_level_env import (
-    DIR_DELTAS,
+from smartcar_sokoban.rl.high_level_env import SokobanHLEnv
+from smartcar_sokoban.solver.auto_player import AutoPlayer
+from smartcar_sokoban.solver.high_level_teacher import (
+    BOMB_DIR_DELTAS,
+    BOMB_DIR_TO_INDEX,
     N_DIRS,
+    N_BOMB_DIRS,
     PUSH_BOMB_START,
     PUSH_BOX_START,
-    SokobanHLEnv,
+    advise_exact_high_level,
 )
-from smartcar_sokoban.solver.auto_player import AutoPlayer
+from smartcar_sokoban.solver.pathfinder import pos_to_grid
 
 
 def _make_env(map_path: str, seed: int, max_steps: int,
@@ -44,19 +43,21 @@ def _make_env(map_path: str, seed: int, max_steps: int,
 def _solver_action_sequence(map_path: str, seed: int, max_steps: int,
                             include_map_layout: bool,
                             max_cost: int,
-                            time_limit: float) -> Optional[List[int]]:
+                            time_limit: float,
+                            strategy: str = "auto") -> Optional[List[int]]:
     env = _make_env(map_path, seed, max_steps, include_map_layout)
-    state = env.engine.get_state()
-    solver = build_solver_from_state(state)
-    with contextlib.redirect_stdout(io.StringIO()):
-        solution = solver.solve(max_cost=max_cost, time_limit=time_limit)
-    if not solution:
-        return None
 
     actions: List[int] = []
-    for move in solution:
+    while True:
         state = env.engine.get_state()
-        action = map_solver_move_to_env_action(state, move)
+        with contextlib.redirect_stdout(io.StringIO()):
+            advice = advise_exact_high_level(
+                state,
+                max_cost=max_cost,
+                time_limit=time_limit,
+                strategy=strategy,
+            )
+        action = advice.primary_action
         if action is None:
             return None
         mask = env.action_masks()
@@ -73,21 +74,25 @@ def _solver_action_sequence(map_path: str, seed: int, max_steps: int,
 
 
 def _infer_push_action_from_transition(before, after) -> Optional[int]:
-    before_car = (int(before.car_x), int(before.car_y))
-    after_car = (int(after.car_x), int(after.car_y))
+    before_car = pos_to_grid(before.car_x, before.car_y)
+    after_car = pos_to_grid(after.car_x, after.car_y)
     delta = (after_car[0] - before_car[0], after_car[1] - before_car[1])
-    if delta not in DIR_TO_INDEX:
-        return None
 
     moved_into = after_car
 
     for idx, box in enumerate(before.boxes):
-        if (int(box.x), int(box.y)) == moved_into:
-            return PUSH_BOX_START + idx * N_DIRS + DIR_TO_INDEX[delta]
+        if pos_to_grid(box.x, box.y) == moved_into:
+            dir_idx = BOMB_DIR_TO_INDEX.get(delta)
+            if dir_idx is None or dir_idx >= N_DIRS:
+                return None
+            return PUSH_BOX_START + idx * N_DIRS + dir_idx
 
     for idx, bomb in enumerate(before.bombs):
-        if (int(bomb.x), int(bomb.y)) == moved_into:
-            return PUSH_BOMB_START + idx * N_DIRS + DIR_TO_INDEX[delta]
+        if pos_to_grid(bomb.x, bomb.y) == moved_into:
+            dir_idx = BOMB_DIR_TO_INDEX.get(delta)
+            if dir_idx is None:
+                return None
+            return PUSH_BOMB_START + idx * N_BOMB_DIRS + dir_idx
 
     return None
 
@@ -113,11 +118,11 @@ def _autoplayer_action_sequence(map_path: str, seed: int) -> Optional[List[int]]
     high_level_actions: List[int] = []
     for low_action in low_level_actions:
         before = copy.deepcopy(replay_engine.get_state())
-        before_car = (int(before.car_x), int(before.car_y))
+        before_car = pos_to_grid(before.car_x, before.car_y)
         after = replay_engine.discrete_step(low_action)
-        after_car = (int(after.car_x), int(after.car_y))
+        after_car = pos_to_grid(after.car_x, after.car_y)
         delta = (after_car[0] - before_car[0], after_car[1] - before_car[1])
-        if delta not in DIR_DELTAS:
+        if delta not in BOMB_DIR_DELTAS:
             continue
 
         action = _infer_push_action_from_transition(before, after)
@@ -134,8 +139,11 @@ def collect_teacher_actions(map_path: str, seed: int, *,
                             max_steps: int,
                             include_map_layout: bool,
                             max_cost: int,
-                            time_limit: float) -> Tuple[Optional[List[int]], str]:
-    if teacher == "solver":
+                            time_limit: float,
+                            strategy: str = "auto"
+                            ) -> Tuple[Optional[List[int]], str]:
+    if teacher in ("solver", "solver_ida"):
+        actual_strategy = "ida" if teacher == "solver_ida" else strategy
         return (
             _solver_action_sequence(
                 map_path,
@@ -144,8 +152,9 @@ def collect_teacher_actions(map_path: str, seed: int, *,
                 include_map_layout,
                 max_cost,
                 time_limit,
+                strategy=actual_strategy,
             ),
-            "solver",
+            f"solver_{actual_strategy}",
         )
 
     if teacher == "autoplayer":
@@ -159,9 +168,10 @@ def collect_teacher_actions(map_path: str, seed: int, *,
             include_map_layout,
             max_cost,
             time_limit,
+            strategy=strategy,
         )
         if solver_actions:
-            return solver_actions, "solver"
+            return solver_actions, f"solver_{strategy}"
         return _autoplayer_action_sequence(map_path, seed), "autoplayer"
 
     raise ValueError(f"unknown teacher: {teacher}")
