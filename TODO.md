@@ -15,9 +15,9 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P1 — 地图生成器修复 (P0 全部完成)
-当前任务：P1.1
-最后一次评估：phase6 BC win=9.33% (14/150) | IDA* 老师上限: 50图仅25解 (50%) | RL 无 phase6 ckpt
+当前阶段：P1 — 地图生成器修复
+当前任务：P1.2 (P0/P1.1 已完成)
+最后一次评估：phase6 BC win=9.33% (14/150) | IDA* 老师上限: 50图仅25解 (50%) | 诊断: 无 IDA* 闸 + 步数 vs 推数
 最后一次评估时间：2026-05-07 03:08
 ```
 
@@ -77,14 +77,12 @@ P0 / P1 / P2 是前置工作，可以并行。**P5 通关率 < 90% 时永远走 
 
 > "垃圾输入垃圾输出"。这一阶段不达标就别开始 P3。
 
-- ☐ **P1.1** 诊断当前生成器
-  - 读 `scripts/maps/gen_quality_maps.py` / `gen_1000_maps.py` / `regen_phase456.py`
-  - 输出诊断报告 `.agent/diag/map_gen.md`，至少回答：
-    - 现有"质量"过滤标准是什么？是否真的在过滤还是只是采样？
-    - 生成器有没有验证图能被 IDA\* 解？
-    - 推数分布、箱子数分布、死锁出现率？
-    - 哪些图是 trivially 解（推 ≤ 5 步）或 unsolvable？
-  - 监控：诊断本身 CPU 用不到，OK。
+- ☑ **P1.1** 诊断完成，报告 `.agent/diag/map_gen.md`
+  - **核心发现**：所有生成器用 BestFirst (6-18s) 当解器，**没有 IDA\* 时限闸**
+  - **过滤的是步数（车走 + 推），不是推数**——所以 phase 6 出现 4 推但 30 步的伪难图
+  - 1010 张 _NNNN.txt 里仅 10 张 _NN.txt 在 manifest，其他 1000 张无 verified seed
+  - phase 6 是 50% phase4-fast + 50% phase5-compact 的简单并集，难度无分层
+  - 修复方案：P1.2 写 `verify_optimal.py` 加 IDA\* 60s 闸 + 推数闸；P1.3 对现有图全过一遍
 - ☐ **P1.2** 写一个 `verify_optimal.py`，对每张图：
   - 跑 `MultiBoxSolver(strategy='ida', time_limit=60)`，要求**找到最优解**才算通过
   - 跑 AutoPlayer 必须也能解（不能解的图过难）
