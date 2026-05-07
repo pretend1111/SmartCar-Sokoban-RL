@@ -18,7 +18,7 @@
 
 ```
 当前阶段：P1 — 符号层实现 (Belief State + 候选生成器)
-当前任务：P1.4
+当前任务：P1.5
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -62,15 +62,11 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
   - 创建 `smartcar_sokoban/symbolic/features.py`
   - 实现：`player_bfs_dist`、`reachable_mask`、`push_dist_field`（reverse-push BFS per box）、`push_dir_field`（流场，由距离场梯度推导）、`deadlock_mask`（corner + edge-line 静态死角）、`info_gain_heatmap`（raycasting from candidate viewpoints）
   - **完成判定**：在 phase 6 平均地图上 benchmark 单次预计算 ≤ 4 ms（含 5 箱）✓ 实测 0.15 ms / call
-- ☐ **P1.4** 候选动作生成器（参考 FINAL_ARCH_DESIGN §3）
+- ☑ **P1.4** 候选动作生成器（参考 FINAL_ARCH_DESIGN §3）
   - 创建 `smartcar_sokoban/symbolic/candidates.py`
-  - 枚举 ≤ 64 个 macro action：
-    - `push_box(i, d, max_run=k)` 多步推送（含 macro 停止条件：拐点 / 死角前 / 距离场拐点）
-    - `push_bomb(k, d)` 含正交 + 4 对角特例
-    - `inspect(viewpoint, heading)` 仅在信息增益 > 0 时生成
-    - `return_garage` 终局可选
-  - 合法性 mask：车可达推位、推链不阻塞、推完不进入死锁、ID 配对约束
-  - **完成判定**：对 50 张随机图，候选数永远 ≤ 64；与引擎实际可执行动作一致（单元测试）
+  - 枚举 ≤ 64 个 macro action ✓ (push_box × 1-3 macro + push_bomb 8 dir + inspect top-8)
+  - 合法性 mask：车可达推位、推链不阻塞、推完不进入死锁、ID 配对约束 ✓
+  - **完成判定** ✓ tests/test_candidates.py 9 测试全过, 0.04 ms / call
 - ☐ **P1.5** 候选特征向量化（128 维，参考 FINAL_ARCH_DESIGN §3.4）
   - 类型 one-hot / 对象描述 / 方向 / 配对 Π / 路径代价 / 推送距离场差分 / 死锁 / 炸弹特征 / 信息增益
   - **完成判定**：candidate feature builder 输出 shape `[64, 128]`，缺位 padding 为 0；类型分布合理（人工抽查 5 张图）
