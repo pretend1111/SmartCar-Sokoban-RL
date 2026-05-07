@@ -73,7 +73,8 @@ def main():
         cmd_train = (
             f'{py} experiments/sage_pr/train_sage_pr.py '
             f'--data {data_args} --tag {train_tag} '
-            f'--batch-size 256 --lr 1e-4 --epochs {args.epochs_per_round}'
+            f'--init-ckpt {cur_ckpt} '
+            f'--batch-size 256 --lr 5e-5 --epochs {args.epochs_per_round}'
         )
         rc = run(cmd_train, f"r{r}_train")
         if rc != 0:

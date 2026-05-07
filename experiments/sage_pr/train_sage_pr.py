@@ -199,6 +199,10 @@ def train(args):
     )
 
     model = build_default_model().to(device)
+    if args.init_ckpt:
+        ck = torch.load(args.init_ckpt, map_location=device)
+        model.load_state_dict(ck["model_state_dict"])
+        print(f"loaded init ckpt {args.init_ckpt}, prev val_acc={ck.get('val_acc', '?'):.3f}")
     print(f"model params: {model.num_parameters():,}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -304,6 +308,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--init-ckpt", default=None,
+                        help="path to initial ckpt (for fine-tune / DAgger).")
     args = parser.parse_args()
     train(args)
 
