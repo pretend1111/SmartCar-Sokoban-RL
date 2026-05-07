@@ -59,6 +59,7 @@ def _verify_one(args: dict) -> dict:
     max_cost = args["max_cost"]
     push_min = args["push_min"]
     push_max = args["push_max"]
+    strategy = args.get("strategy", "ida")
 
     cfg = GameConfig()
     cfg.control_mode = "discrete"
@@ -89,7 +90,7 @@ def _verify_one(args: dict) -> dict:
         try:
             with contextlib.redirect_stdout(devnull):
                 sol = solver.solve(max_cost=max_cost, time_limit=ida_time,
-                                   strategy="ida")
+                                   strategy=strategy)
         except Exception as e:
             last_status = f"ida_error:{e}"
             continue
@@ -149,6 +150,8 @@ def main() -> int:
     p.add_argument("--max-cost", type=int, default=200)
     p.add_argument("--push-min", type=int, default=15)
     p.add_argument("--push-max", type=int, default=40)
+    p.add_argument("--strategy", choices=["ida", "auto", "best_first"], default="ida",
+                   help="solver strategy. ida=strict optimal (slow), auto/best_first=1.5x OPT (fast)")
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--output", required=True)
     p.add_argument("--filter-pattern", default="*.txt",
@@ -177,6 +180,7 @@ def main() -> int:
             "max_cost": args.max_cost,
             "push_min": args.push_min,
             "push_max": args.push_max,
+            "strategy": args.strategy,
         }
         for mp in map_list
     ]
