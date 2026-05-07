@@ -17,8 +17,11 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P3 — 数据生成 (Candidate-aware dataset)
-当前任务：P3.6 (跳过 P3.2-P3.5 高级功能, 先建基础数据集 → P4 训练)
+当前阶段：P4 — Stage A BC 已跑通, 现要扩数据 + 重训
+当前任务：P3.6 v2 (扩展 phase 4-6 verified seed; 用 2 位 manifest 中 40 seed/图)
+最新评估 (bc_v1, 100 maps × seed 0):
+  phase 1=100%, 2=97%, 3=76%, 4=28%, 5=23%, 6=45%
+卡点: phase 4-5-6 远低于目标. 数据量 phase 5 仅 11K, 太少. BC ceiling.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -338,8 +341,11 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 时间 | 阶段 | 结果 |
 |---|---|---|
 | 2026-05-07 | 旧 baseline (combined v3 + branch budget=256) | phase 1=100%, 2=99.6%, 3=95.25%, 4=44.74%, 5=61.09%, 6=50.77%（仅作起点参照） |
-| — | P1 完成 | — |
-| — | P4 Stage A 完成 | — |
+| 2026-05-08 | P1 完成 (符号层) | belief / features / candidates / cand_features 全 PASS, 0.15/0.04/0.16 ms |
+| 2026-05-08 | P2 完成 (SAGE-PR 网络) | 105K params, INT8 ~106KB, bs=512 cuda 2.97ms |
+| 2026-05-08 | P3.1 + P3.6 (基础数据集) | 158K samples (phase1=35K p2=31K p3=46K p4=19K p5=11K p6=15K) |
+| 2026-05-08 | P4 Stage A bc_v1 (30 epoch) | val_acc 92.8% / 100 maps eval: p1=100, p2=97, p3=76, p4=28, p5=23, p6=45 |
+| — | P4 Stage A bc_v2 (扩数据集) | — |
 | — | P5 DAgger 完成 | — |
 | — | P6 QAT 完成 | — |
 
