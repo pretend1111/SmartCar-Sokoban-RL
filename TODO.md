@@ -18,7 +18,7 @@
 
 ```
 当前阶段：P3 — 数据生成 (Candidate-aware dataset)
-当前任务：P3.1
+当前任务：P3.6 (跳过 P3.2-P3.5 高级功能, 先建基础数据集 → P4 训练)
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -104,12 +104,12 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
 
 > 数据格式必须跟 SAGE-PR 输入对齐：每个样本包含 `(X_grid, X_cand, u_global, mask, soft_q_label)`。**不能直接用旧 `phase{N}_v2.npz`**——那是为旧 54-类 head 准备的，候选格式完全不同。
 
-- ☐ **P3.1** 重写 `build_dataset_v3.py`，支持 candidate-aware 输出
-  - 创建 `experiments/sage_pr/build_dataset_v3.py`
-  - 每步从 belief state 调 P1.4 候选生成器，得到 `[64, 128]` 候选张量
-  - 每步用 P1.3 领域特征预计算填 `X_grid: [10, 14, 30]`
-  - 老师标签：用 IDA* / BestFirst 求解器找出"专家会选哪个候选"
-  - **完成判定**：对 phase 1（10 张图 × 3 seed）build 出来的 npz 包含正确 keys；shape 对；mask 正确
+- ☑ **P3.1** 重写 `build_dataset_v3.py`，支持 candidate-aware 输出
+  - 创建 `experiments/sage_pr/build_dataset_v3.py` ✓
+  - 每步从 belief state 调 P1.4 候选生成器，得到 `[64, 128]` 候选张量 ✓
+  - 每步用 P1.3 领域特征预计算填 `X_grid: [10, 14, 30]` ✓
+  - 老师标签：用 BestFirst 求解器找出"专家会选哪个候选" (`match_move_to_candidate`) ✓
+  - **完成判定** ✓ phase 1 30 任务全 ok 321 samples; phase 4 verified 5 任务 89 samples; npz keys 齐全
 - ☐ **P3.2** 多老师质量分派（参考 FINAL_ARCH_DESIGN §5.6）
   - phase 1-3 + phase 4 verified-seed → IDA*（loss 权重 1.0）
   - phase 4-6 主体 → BestFirst（loss 权重 0.8）
