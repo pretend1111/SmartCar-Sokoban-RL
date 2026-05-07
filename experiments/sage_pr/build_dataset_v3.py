@@ -130,8 +130,8 @@ def apply_solver_move(eng: GameEngine, move) -> bool:
 # ── 候选 label 匹配 ──────────────────────────────────────
 
 def match_move_to_candidate(move, cands: List[Candidate],
-                            bs: BeliefState) -> Optional[int]:
-    """找 candidate index 使 (type, box_idx 或 bomb_idx, direction, run_length=1) 匹配 move."""
+                            bs: BeliefState, run_length: int = 1) -> Optional[int]:
+    """找 candidate index 使 (type, box_idx 或 bomb_idx, direction, run_length) 匹配 move."""
     etype, eid, direction, _ = move
 
     if etype == "box":
@@ -141,7 +141,7 @@ def match_move_to_candidate(move, cands: List[Candidate],
                 for k, c in enumerate(cands):
                     if c.type != "push_box" or not c.legal:
                         continue
-                    if c.box_idx == i and c.direction == direction and c.run_length == 1:
+                    if c.box_idx == i and c.direction == direction and c.run_length == run_length:
                         return k
                 return None
     elif etype == "bomb":
@@ -155,6 +155,33 @@ def match_move_to_candidate(move, cands: List[Candidate],
                         return k
                 return None
     return None
+
+
+def compute_macro_run_length(moves: List, idx: int, max_k: int = 3) -> int:
+    """看 moves[idx:] 头部连续多少步是 same (etype, direction) 且 entity 顺序串联."""
+    if idx >= len(moves):
+        return 0
+    m_i = moves[idx]
+    etype_i, eid_i, dir_i, _ = m_i
+    if etype_i != "box":
+        return 1   # 炸弹不做 macro
+    pos_i, cid_i = eid_i
+    cur_pos = pos_i
+    k = 1
+    while k < max_k and idx + k < len(moves):
+        m_k = moves[idx + k]
+        etype_k, eid_k, dir_k, _ = m_k
+        if etype_k != "box" or dir_k != dir_i:
+            break
+        pos_k, cid_k = eid_k
+        if cid_k != cid_i:
+            break
+        expected = (cur_pos[0] + dir_i[0], cur_pos[1] + dir_i[1])
+        if pos_k != expected:
+            break
+        cur_pos = pos_k
+        k += 1
+    return k
 
 
 # ── 单 episode 采集 ──────────────────────────────────────
@@ -172,12 +199,17 @@ class Sample:
 
 def collect_episode(map_path: str, phase: int, seed: int,
                     *, strategy: str, max_cost: int, time_limit: float,
-                    fully_observed: bool = True) -> Tuple[List[Sample], str]:
+                    fully_observed: bool = True,
+                    use_macro: bool = True) -> Tuple[List[Sample], str]:
     """采集单张图的所有样本.
 
     Returns:
         (samples, status)
         status in {"ok", "no_solve", "label_miss", "step_fail", "no_samples"}
+
+    Args:
+        use_macro: 若 True, 把连续 same (entity, dir) 推送压成 macro action
+            (run_length=1..3), 缩短轨迹长度.
     """
     eng = GameEngine()
     import smartcar_sokoban.map_loader as map_loader_module
@@ -200,19 +232,35 @@ def collect_episode(map_path: str, phase: int, seed: int,
 
     samples: List[Sample] = []
     label_miss = 0
+    i = 0
 
-    for move in moves:
+    while i < len(moves):
         # 捕获状态
         bs = BeliefState.from_engine_state(eng.state, fully_observed=fully_observed)
         feat = compute_domain_features(bs)
         cands = generate_candidates(bs, feat)
 
-        label = match_move_to_candidate(move, cands, bs)
+        # 计算 macro run_length
+        if use_macro:
+            k_macro = compute_macro_run_length(moves, i, max_k=3)
+        else:
+            k_macro = 1
+
+        # 优先匹配 macro, 失败回落到 1-step
+        label = None
+        actual_k = 1
+        for try_k in range(k_macro, 0, -1):
+            label = match_move_to_candidate(moves[i], cands, bs, run_length=try_k)
+            if label is not None:
+                actual_k = try_k
+                break
+
         if label is None:
             label_miss += 1
-            # 仍然尝试推进引擎以保持轨迹同步 (label_miss 的 sample 跳过保存)
-            if not apply_solver_move(eng, move):
+            # 推进引擎 (跳过该 sample)
+            if not apply_solver_move(eng, moves[i]):
                 return samples, "step_fail"
+            i += 1
             continue
 
         X_grid = build_grid_tensor(bs, feat)
@@ -230,8 +278,11 @@ def collect_episode(map_path: str, phase: int, seed: int,
             source=source,
         ))
 
-        if not apply_solver_move(eng, move):
-            return samples, "step_fail"
+        # 应用 actual_k 次 (macro)
+        for j in range(actual_k):
+            if not apply_solver_move(eng, moves[i + j]):
+                return samples, "step_fail"
+        i += actual_k
 
     if not samples:
         return [], "no_samples"
@@ -343,6 +394,8 @@ def main():
                         help="输出 npz 路径 (如 .agent/sage_pr/phase4.npz)")
     parser.add_argument("--use-verified-seeds", action="store_true",
                         help="按 phase456_seed_manifest 选 seed")
+    parser.add_argument("--max-seeds-per-map", type=int, default=None,
+                        help="对 verified maps 的最大 seed 数 (默认与 --seeds 数相同)")
     args = parser.parse_args()
 
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
@@ -374,8 +427,9 @@ def main():
                 continue
             if args.phase is not None and f"phase{args.phase}/" not in map_path:
                 continue
-            # 限制每图 seed 数 (默认全部)
-            ms_use = ms[:max(1, len(seeds))]
+            # 限制每图 seed 数 (默认与 --seeds 数相同, 或 --max-seeds-per-map)
+            n_per = args.max_seeds_per_map or max(1, len(seeds))
+            ms_use = ms[:n_per]
             for seed in ms_use:
                 tasks.append((map_path, args.phase, seed, args.strategy,
                               args.max_cost, args.time_limit))
