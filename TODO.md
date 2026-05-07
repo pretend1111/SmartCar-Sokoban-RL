@@ -17,11 +17,12 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P4 — Stage A BC 已跑通, 现要扩数据 + 重训
-当前任务：P3.6 v2 (扩展 phase 4-6 verified seed; 用 2 位 manifest 中 40 seed/图)
-最新评估 (bc_v1, 100 maps × seed 0):
-  phase 1=100%, 2=97%, 3=76%, 4=28%, 5=23%, 6=45%
-卡点: phase 4-5-6 远低于目标. 数据量 phase 5 仅 11K, 太少. BC ceiling.
+当前阶段：P5 — DAgger 多轮迭代 (BC 已收敛到上限)
+当前任务：P5 大规模 DAgger (200+ maps × 多轮, 每轮训 + eval)
+最新评估 (bc_v5, top-k=4, 100 maps × seed 0):
+  phase 1=100%, 2=96%, 3=83%, 4=33%, 5=26%, 6=46%
+分析: BC 已经收敛到 92.8% per-step val_acc. 再训不动. 必须 DAgger 多轮.
+预期: 每轮 +3-5pp on phase 4-6. 需 5-10 轮才能达到 90% phase 6.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -345,8 +346,10 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | P2 完成 (SAGE-PR 网络) | 105K params, INT8 ~106KB, bs=512 cuda 2.97ms |
 | 2026-05-08 | P3.1 + P3.6 (基础数据集) | 158K samples (phase1=35K p2=31K p3=46K p4=19K p5=11K p6=15K) |
 | 2026-05-08 | P4 Stage A bc_v1 (30 epoch) | val_acc 92.8% / 100 maps eval: p1=100, p2=97, p3=76, p4=28, p5=23, p6=45 |
-| — | P4 Stage A bc_v2 (扩数据集) | — |
-| — | P5 DAgger 完成 | — |
+| 2026-05-08 | P4 Stage A bc_v2 (扩 v3 数据 60ep) | val_acc 93.3%, eval: p1=100, p2=95, p3=76, p4=33, p5=33, p6=46 |
+| 2026-05-08 | P4 bc_v3 (macro labels 60ep) | val_acc 83.6% (差), eval: p4=29, p5=28, p6=41 - macro alone hurts |
+| 2026-05-08 | P4 bc_v5 (bc_v2 + DAgger r1 808 samples) | val_acc 92.3%; eval top-k=4: p1=100, p2=96, p3=83, p4=33, p5=26, p6=46 |
+| — | P5 DAgger 多轮迭代 | — |
 | — | P6 QAT 完成 | — |
 
 ---
