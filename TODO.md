@@ -15,17 +15,18 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P5 phase 1/2 达标, phase 4-6 缺数据
-当前任务: 等 phase 5/6 v2 build (relaxed) + phase 3 build, 然后全 phase combined
-最后一次评估 (combined p1+p2+p4+p5+p6, conv h=1024, 124K samples):
-  phase 1: **99.41%** ✓ ≥95%
-  phase 2: **97.23%** ✓ ≥95%
-  phase 4: 17.54% (verify cap 55.9%)
-  phase 5: 26.67% (verify cap 64.7%)
-  phase 6: 18.73% (verify cap 57.5%)
-phase 1/2 已过线。phase 4/5/6 model 解了 ~30-40% 的 verified maps,
-需要更多 phase-specific 数据 (phase 5/6 v2 build 进行中).
-最后一次评估时间：2026-05-07 09:50
+当前阶段：P6 self_improve_loop 修 distribution shift
+当前任务: phase 3 self_improve / 备选: 加大 phase 4-6 数据
+最后一次评估 (combined ALL v2, conv h=1024, 193K samples):
+  phase 1: **100.00%** ✓ ≥95%
+  phase 2: **95.25%** ✓ ≥95%
+  phase 3: 63.17% — verify cap 98% 但 BC 卡在 distribution shift
+  phase 4: 18.03% (cap 55.9%)
+  phase 5: 33.80% (cap 64.7%)
+  phase 6: 26.90% (cap 57.5%)
+phase 1/2 ✓. phase 3-6 仍需 +30~38pp, BC 单纯加数据收益递减;
+要靠 self_improve_loop / branch search inference 修 distribution shift.
+最后一次评估时间：2026-05-07 12:00
 ```
 
 > **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
