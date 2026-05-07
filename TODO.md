@@ -15,13 +15,17 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P4 联合训练 + 容量扫描
-当前任务：等 phase 3/4/5/6 完, 跑全 phase combined h=1024
-最后一次评估 (combined p1+p2+p6, conv h=1024, 72K):
-  phase 1: **99.11%** ✓ ≥95% (h=512: 95.45%, +3.7pp)
-  phase 2: **94.95%** ≈ 95% (h=512: 93.17%, +1.8pp, 距 0.05pp)
-  phase 6: 13.75% (h=512: 13.85%, ≈, 数据是瓶颈)
-最后一次评估时间：2026-05-07 06:00
+当前阶段：P4 全 phase combined + 拓宽 verify
+当前任务: phase 4/5/6 重 verify (push_min 放宽), 等 build 完
+最后一次评估 (combined p1+p2+p5+p6, conv h=1024, 89K):
+  phase 1: 96.34% ✓ ≥95%
+  phase 2: 94.06% (差 0.94pp)
+  phase 5: 25.02% — verify 上限 41% (215 maps push_too_low 可救回)
+  phase 6: 14.77% — verify 上限 32% (269 maps push_too_low 可救回)
+**核心发现**: verify pass_rate = BC win_rate 上限.
+  phase 4: 54.5%, phase 5: 41.1%, phase 6: 31.7% → 必须放宽 push_min
+  把 push_too_low 的 maps 救回 (IDA* 实际解了, 只是推数低于当时的 curriculum 阈值).
+最后一次评估时间：2026-05-07 09:00
 ```
 
 > **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
