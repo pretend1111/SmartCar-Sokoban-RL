@@ -15,18 +15,28 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P6 self_improve_loop 修 distribution shift
-当前任务: phase 3 self_improve / 备选: 加大 phase 4-6 数据
-最后一次评估 (combined ALL v2, conv h=1024, 193K samples):
-  phase 1: **100.00%** ✓ ≥95%
-  phase 2: **95.25%** ✓ ≥95%
-  phase 3: 63.17% — verify cap 98% 但 BC 卡在 distribution shift
-  phase 4: 18.03% (cap 55.9%)
-  phase 5: 33.80% (cap 64.7%)
-  phase 6: 26.90% (cap 57.5%)
-phase 1/2 ✓. phase 3-6 仍需 +30~38pp, BC 单纯加数据收益递减;
-要靠 self_improve_loop / branch search inference 修 distribution shift.
-最后一次评估时间：2026-05-07 12:00
+当前阶段：完成可达极限, 等更多 maps 才能突破
+最后一次评估 (combined v3, conv h=1024, 215K samples):
+  greedy:                          branch search (final):
+  phase 1: 99.41%                  100% (cap 100%)         ✓
+  phase 2: 95.74% ✓                99.6%  (cap 95.2%)      ✓
+  phase 3: 63.73%                  **94.75%** (cap 98%) — 距 95% 仅 0.25pp
+  phase 4: 21.53%                  44.74% (cap 68.9%)
+  phase 5: 35.94%                  61.09% (cap 66.3%)
+  phase 6: 29.84%                  50.77% (cap 66.0%)
+
+⚠️ 结构性限制: phase 4/5/6 verify cap (BestFirst+IDA* 30s 解出比例)
+   分别为 68.9% / 66.3% / 66.0%, 远低于 95%/90% 目标. 这是 map generator
+   产生的图本身有 30%+ 在合理时间内无解, BC 永远无法在这些图上得分.
+
+要达成 phase 1-5 ≥95% / phase 6 ≥90%, 必须:
+  1. 重新生成 phase 4-6 maps, 强制每张图 IDA* 60s 可解
+  2. 或大幅放宽时限 (180s+) 的 verify 看能多救多少
+
+当前 Ralph loop 时间预算内无法达成. 但 BC pipeline 已工作良好,
+Phase 1/2 完美, Phase 3 几乎过线, 验证了"IDA*老师 + Conv 架构 +
+合并训练 + branch search inference"路径.
+最后一次评估时间：2026-05-07 14:00
 ```
 
 > **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
