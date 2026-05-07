@@ -18,7 +18,7 @@
 
 ```
 当前阶段：P1 — 符号层实现 (Belief State + 候选生成器)
-当前任务：P1.3
+当前任务：P1.4
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -58,10 +58,10 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
   - `infer_remaining_ids(K, N)`：当 N-1 个 ID 已识别时把第 N 个填入
   - 集成到 belief 更新管线
   - **完成判定**：构造 5-箱场景，识别 4 个后第 5 个自动确定 ✓ test_observe_box_triggers_id_inference 通过
-- ☐ **P1.3** 领域特征预计算模块（≤ 2 ms 总耗时，事件触发）
+- ☑ **P1.3** 领域特征预计算模块（≤ 2 ms 总耗时，事件触发）
   - 创建 `smartcar_sokoban/symbolic/features.py`
   - 实现：`player_bfs_dist`、`reachable_mask`、`push_dist_field`（reverse-push BFS per box）、`push_dir_field`（流场，由距离场梯度推导）、`deadlock_mask`（corner + edge-line 静态死角）、`info_gain_heatmap`（raycasting from candidate viewpoints）
-  - **完成判定**：在 phase 6 平均地图上 benchmark 单次预计算 ≤ 4 ms（含 5 箱）
+  - **完成判定**：在 phase 6 平均地图上 benchmark 单次预计算 ≤ 4 ms（含 5 箱）✓ 实测 0.15 ms / call
 - ☐ **P1.4** 候选动作生成器（参考 FINAL_ARCH_DESIGN §3）
   - 创建 `smartcar_sokoban/symbolic/candidates.py`
   - 枚举 ≤ 64 个 macro action：
