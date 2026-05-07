@@ -57,10 +57,22 @@ def candidate_to_solver_move(cand: Candidate, bs: BeliefState):
     return None
 
 
+def _state_signature(state):
+    """简易状态哈希: (car_pos, frozenset boxes, frozenset bombs)."""
+    return (
+        round(state.car_x * 2),
+        round(state.car_y * 2),
+        frozenset((round(b.x * 2), round(b.y * 2)) for b in state.boxes),
+        frozenset((round(b.x * 2), round(b.y * 2)) for b in state.bombs),
+    )
+
+
 def rollout_one(model, device, map_path: str, seed: int, *,
                 step_limit: int = 60,
+                top_k: int = 1,
                 fully_observed: bool = True) -> Tuple[bool, int, float]:
-    """单图 deterministic rollout."""
+    """单图 deterministic rollout. top_k=1 = 纯 greedy; >1 = top-k 中找首个非重复状态.
+    """
     import random
     random.seed(seed)
 
@@ -68,6 +80,9 @@ def rollout_one(model, device, map_path: str, seed: int, *,
     state = eng.reset(map_path)
     inf_total = 0.0
     inf_calls = 0
+
+    visited_sigs = set()
+    visited_sigs.add(_state_signature(eng.get_state()))
 
     for step in range(step_limit):
         s = eng.get_state()
@@ -87,7 +102,6 @@ def rollout_one(model, device, map_path: str, seed: int, *,
         u_global = build_global_features(bs, feat)
         mask = candidates_legality_mask(cands)
 
-        # batch = 1
         xg_t = torch.from_numpy(X_grid).unsqueeze(0).to(device)
         xc_t = torch.from_numpy(X_cand).unsqueeze(0).to(device)
         ug_t = torch.from_numpy(u_global).unsqueeze(0).to(device)
@@ -99,29 +113,53 @@ def rollout_one(model, device, map_path: str, seed: int, *,
         inf_total += time.perf_counter() - t0
         inf_calls += 1
 
-        action_idx = int(score.argmax(dim=-1).item())
-        cand = cands[action_idx]
-        if not cand.legal:
-            # mask 应该已经 -inf 了, 但万一: 只取 legal 中最大
-            score_np = score.cpu().numpy().squeeze(0)
-            score_np[~np.array(legal)] = -1e9
-            action_idx = int(score_np.argmax())
-            cand = cands[action_idx]
-        if not cand.legal:
+        score_np = score.cpu().numpy().squeeze(0)
+        score_np[~np.array(legal)] = -1e9
+        # top-k 候选
+        order = np.argsort(-score_np)
+
+        # 找第一个: legal + apply 后状态未访问过
+        chosen_idx = None
+        for k in range(min(top_k, len(order))):
+            idx = int(order[k])
+            cand = cands[idx]
+            if not cand.legal:
+                continue
+            move = candidate_to_solver_move(cand, bs)
+            if move is None:
+                continue
+            # 试用一个克隆引擎模拟一步, 检查状态变化
+            import copy
+            eng_clone = copy.deepcopy(eng)
+            if not apply_solver_move(eng_clone, move):
+                continue
+            sig = _state_signature(eng_clone.get_state())
+            if sig in visited_sigs:
+                continue
+            chosen_idx = idx
+            break
+
+        if chosen_idx is None:
+            # 所有 top-k 都被访问过 / 不合法 → 回退到 top-1 (允许重访)
+            for k in range(min(top_k, len(order))):
+                idx = int(order[k])
+                if cands[idx].legal:
+                    chosen_idx = idx
+                    break
+        if chosen_idx is None:
             return False, step, inf_total / max(inf_calls, 1)
 
+        cand = cands[chosen_idx]
         move = candidate_to_solver_move(cand, bs)
-        if move is None:
-            return False, step, inf_total / max(inf_calls, 1)
-
         if not apply_solver_move(eng, move):
             return False, step, inf_total / max(inf_calls, 1)
+        visited_sigs.add(_state_signature(eng.get_state()))
 
     return eng.get_state().won, step_limit, inf_total / max(inf_calls, 1)
 
 
 def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
-                   *, step_limit: int = 60,
+                   *, step_limit: int = 60, top_k: int = 1,
                    max_maps: Optional[int] = None,
                    verified_seeds_map: Optional[Dict[str, List[int]]] = None,
                    ) -> Dict[str, float]:
@@ -139,7 +177,7 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
             ms = seeds_per_map
         for seed in ms:
             won, steps, avg_inf = rollout_one(model, device, map_path, seed,
-                                              step_limit=step_limit)
+                                              step_limit=step_limit, top_k=top_k)
             n_total += 1
             if won:
                 n_won += 1
@@ -165,7 +203,9 @@ def main():
     parser.add_argument("--max-maps", type=int, default=None,
                         help="limit per phase (None=all)")
     parser.add_argument("--use-verified-seeds", action="store_true",
-                        help="使用 phase456_seed_manifest 中每图的 verified seed (按 --seeds 数取前 N 个)")
+                        help="使用 phase456_seed_manifest 中每图的 verified seed")
+    parser.add_argument("--top-k", type=int, default=1,
+                        help="rollout 时尝试 top-k 候选, 跳过会重访状态的 (避免循环). top_k=1 = 纯 greedy.")
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
@@ -190,7 +230,8 @@ def main():
         print(f"\n=== Phase {ph} ===")
         t0 = time.perf_counter()
         r = evaluate_phase(model, device, ph, seeds,
-                           step_limit=args.step_limit, max_maps=args.max_maps,
+                           step_limit=args.step_limit, top_k=args.top_k,
+                           max_maps=args.max_maps,
                            verified_seeds_map=verified_map)
         elapsed = time.perf_counter() - t0
         print(f"  win_rate = {r['win_rate']*100:.2f}% "
