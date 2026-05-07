@@ -1,0 +1,312 @@
+"""SAGE-PR Stage A — BC 预训练.
+
+输入: 多个 npz (build_dataset_v3 输出), 合并成 phase-stratified 大数据集.
+损失:
+    L = L_policy + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress
+    (P3 完整版会加 ranking loss 与 info_gain. 此 Stage A 只用 BC + value 估算.)
+
+优化:
+    AdamW lr=3e-4 cosine -> 3e-5
+    batch=256, weight_decay=1e-4, grad_clip=1.0
+    80 epoch (默认), phase-stratified 采样 5/10/15/25/20/25%
+
+输出:
+    .agent/sage_pr/runs/<tag>/best.pt
+    .agent/sage_pr/runs/<tag>/train.log
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from experiments.sage_pr.model import build_default_model
+
+
+# ── 数据集 ────────────────────────────────────────────────
+
+class SagePrDataset(Dataset):
+    """从多个 npz 加载样本, 合并 + phase index."""
+    def __init__(self, npz_paths: List[str]):
+        self.X_grid: List[np.ndarray] = []
+        self.X_cand: List[np.ndarray] = []
+        self.u_global: List[np.ndarray] = []
+        self.mask: List[np.ndarray] = []
+        self.label: List[np.ndarray] = []
+        self.phase: List[np.ndarray] = []
+        self.source: List[np.ndarray] = []
+
+        for path in npz_paths:
+            print(f"  load {path}")
+            d = np.load(path)
+            self.X_grid.append(d["X_grid"])
+            self.X_cand.append(d["X_cand"])
+            self.u_global.append(d["u_global"])
+            self.mask.append(d["mask"])
+            self.label.append(d["label"])
+            self.phase.append(d["phase"])
+            self.source.append(d["source"])
+
+        self.X_grid = np.concatenate(self.X_grid, axis=0)
+        self.X_cand = np.concatenate(self.X_cand, axis=0)
+        self.u_global = np.concatenate(self.u_global, axis=0)
+        self.mask = np.concatenate(self.mask, axis=0)
+        self.label = np.concatenate(self.label, axis=0)
+        self.phase = np.concatenate(self.phase, axis=0)
+        self.source = np.concatenate(self.source, axis=0)
+        print(f"  total: {len(self.label)} samples; phases unique = "
+              f"{np.unique(self.phase).tolist()}")
+
+    def __len__(self):
+        return len(self.label)
+
+    def __getitem__(self, idx: int):
+        # X_grid: stored as [10, 14, 30] -> PyTorch [30, 10, 14]
+        xg = self.X_grid[idx].transpose(2, 0, 1)
+        return {
+            "X_grid": xg.astype(np.float32),
+            "X_cand": self.X_cand[idx].astype(np.float32),
+            "u_global": self.u_global[idx].astype(np.float32),
+            "mask": self.mask[idx].astype(np.float32),
+            "label": int(self.label[idx]),
+            "phase": int(self.phase[idx]),
+        }
+
+
+def collate(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+    out: Dict[str, torch.Tensor] = {}
+    for k in ["X_grid", "X_cand", "u_global", "mask"]:
+        out[k] = torch.from_numpy(np.stack([b[k] for b in batch], axis=0))
+    out["label"] = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+    out["phase"] = torch.tensor([b["phase"] for b in batch], dtype=torch.long)
+    return out
+
+
+# ── Phase-stratified sampler (简化版: 加权随机) ─────────────
+
+def make_phase_weights(phase: np.ndarray, target: Dict[int, float]) -> np.ndarray:
+    """每样本权重: 让 phase 1-6 出现频率匹配 target dict.
+
+    target: {phase_id (int 1-6): freq (float, 总和 = 1.0)}.
+    """
+    n = len(phase)
+    actual = {p: int((phase == p).sum()) for p in np.unique(phase)}
+    weights = np.ones(n, dtype=np.float64)
+    total_target = sum(target.values()) or 1.0
+    for p, freq in target.items():
+        cnt = actual.get(p, 0)
+        if cnt == 0:
+            continue
+        weights[phase == p] = freq / total_target / cnt * n
+    return weights
+
+
+# ── 损失 ──────────────────────────────────────────────────
+
+def compute_losses(model, batch, device):
+    X_grid = batch["X_grid"].to(device)
+    X_cand = batch["X_cand"].to(device)
+    u_global = batch["u_global"].to(device)
+    mask = batch["mask"].to(device)
+    label = batch["label"].to(device)
+
+    score, value, deadlock, progress, info_gain = model(X_grid, X_cand, u_global, mask)
+    # score: [B, 64], label: [B]
+    loss_policy = F.cross_entropy(score, label)
+
+    # value head 监督: 用 1.0 (合法专家行动 = 高价值) 作为弱监督
+    target_value = torch.ones_like(value)
+    loss_value = F.smooth_l1_loss(value, target_value)
+
+    # Deadlock head 自监督: 老师选的候选不应是死锁 -> 0
+    dl_label = torch.zeros_like(deadlock)
+    selected_dl = deadlock.gather(1, label.unsqueeze(1)).squeeze(1)
+    loss_deadlock = F.binary_cross_entropy(selected_dl, torch.zeros_like(selected_dl))
+
+    # Progress head 监督: 老师选的应该让进度增加 (1 = 推得近) → 弱信号
+    selected_pg = progress.gather(1, label.unsqueeze(1)).squeeze(1)
+    target_pg = torch.ones_like(selected_pg) * 0.5
+    loss_progress = F.smooth_l1_loss(selected_pg, target_pg)
+
+    total = loss_policy + 0.3 * loss_value + 0.2 * loss_deadlock + 0.2 * loss_progress
+
+    # 准确率 (top-1)
+    with torch.no_grad():
+        pred = score.argmax(dim=-1)
+        acc = (pred == label).float().mean().item()
+    return total, {
+        "policy": loss_policy.item(),
+        "value": loss_value.item(),
+        "deadlock": loss_deadlock.item(),
+        "progress": loss_progress.item(),
+        "acc": acc,
+    }
+
+
+# ── 训练循环 ──────────────────────────────────────────────
+
+def train(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device: {device}")
+
+    npz_paths = []
+    for p in args.data:
+        if not os.path.isabs(p):
+            p = os.path.join(ROOT, p)
+        npz_paths.append(p)
+    dataset = SagePrDataset(npz_paths)
+    n = len(dataset)
+
+    # 划分 train / val 80:20
+    np.random.seed(42)
+    idx = np.random.permutation(n)
+    n_train = int(n * 0.8)
+    train_idx = idx[:n_train]
+    val_idx = idx[n_train:]
+
+    train_phases = dataset.phase[train_idx]
+    target_dist = {1: 0.05, 2: 0.10, 3: 0.15, 4: 0.25, 5: 0.20, 6: 0.25}
+    weights_full = make_phase_weights(train_phases, target_dist)
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights_full.tolist(), num_samples=len(train_idx), replacement=True
+    )
+
+    train_subset = torch.utils.data.Subset(dataset, train_idx.tolist())
+    val_subset = torch.utils.data.Subset(dataset, val_idx.tolist())
+
+    train_loader = DataLoader(
+        train_subset, batch_size=args.batch_size, sampler=sampler,
+        collate_fn=collate, num_workers=0, pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_subset, batch_size=args.batch_size, shuffle=False,
+        collate_fn=collate, num_workers=0, pin_memory=True,
+    )
+
+    model = build_default_model().to(device)
+    print(f"model params: {model.num_parameters():,}")
+
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    n_epoch = args.epochs
+    n_iter_per_epoch = len(train_loader)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=n_epoch * n_iter_per_epoch, eta_min=args.lr * 0.1,
+    )
+
+    out_dir = os.path.join(ROOT, ".agent/sage_pr/runs", args.tag)
+    os.makedirs(out_dir, exist_ok=True)
+    best_val_acc = 0.0
+    log_path = os.path.join(out_dir, "train.log")
+    log_f = open(log_path, "w", encoding="utf-8")
+
+    def log(msg):
+        print(msg)
+        log_f.write(msg + "\n")
+        log_f.flush()
+
+    log(f"epochs={n_epoch}, batch={args.batch_size}, lr={args.lr}")
+    log(f"train n={len(train_idx)}, val n={len(val_idx)}")
+
+    t0 = time.perf_counter()
+    for epoch in range(n_epoch):
+        model.train()
+        accum: Dict[str, float] = {}
+        n_batches = 0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            loss, metrics = compute_losses(model, batch, device)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+
+            for k, v in metrics.items():
+                accum[k] = accum.get(k, 0.0) + v
+            accum["loss"] = accum.get("loss", 0.0) + loss.item()
+            n_batches += 1
+
+        train_metrics = {k: v / max(n_batches, 1) for k, v in accum.items()}
+
+        # Val
+        model.eval()
+        val_acc_total = 0.0
+        val_loss_total = 0.0
+        val_n = 0
+        per_phase_acc: Dict[int, Tuple[int, int]] = {}
+        with torch.no_grad():
+            for batch in val_loader:
+                loss, metrics = compute_losses(model, batch, device)
+                B = batch["label"].size(0)
+                val_acc_total += metrics["acc"] * B
+                val_loss_total += loss.item() * B
+                val_n += B
+                # per phase 准确率
+                pred = (model(batch["X_grid"].to(device),
+                              batch["X_cand"].to(device),
+                              batch["u_global"].to(device),
+                              batch["mask"].to(device))[0]).argmax(dim=-1).cpu().numpy()
+                lbl = batch["label"].numpy()
+                ph = batch["phase"].numpy()
+                for i in range(B):
+                    p = int(ph[i])
+                    correct = int(pred[i] == lbl[i])
+                    cnt, ok = per_phase_acc.get(p, (0, 0))
+                    per_phase_acc[p] = (cnt + 1, ok + correct)
+
+        val_acc = val_acc_total / max(val_n, 1)
+        val_loss = val_loss_total / max(val_n, 1)
+        ph_acc_str = ", ".join([
+            f"p{p}={ok / cnt:.3f} ({cnt})"
+            for p, (cnt, ok) in sorted(per_phase_acc.items())
+        ])
+
+        elapsed = time.perf_counter() - t0
+        log(f"epoch {epoch + 1:3d}/{n_epoch} | "
+            f"train loss={train_metrics['loss']:.3f} acc={train_metrics['acc']:.3f} | "
+            f"val loss={val_loss:.3f} acc={val_acc:.3f} | "
+            f"per-phase: {ph_acc_str} | {elapsed:.0f}s")
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            ckpt_path = os.path.join(out_dir, "best.pt")
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "epoch": epoch + 1,
+                "val_acc": val_acc,
+                "args": vars(args),
+            }, ckpt_path)
+            log(f"  saved best (val_acc={val_acc:.3f}) → {ckpt_path}")
+
+    log_f.close()
+    print("done.")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", nargs="+", required=True,
+                        help="npz paths (one or more)")
+    parser.add_argument("--tag", required=True, help="run tag")
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--epochs", type=int, default=40)
+    args = parser.parse_args()
+    train(args)
+
+
+if __name__ == "__main__":
+    main()
