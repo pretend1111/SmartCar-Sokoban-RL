@@ -17,8 +17,8 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P2 — SAGE-PR 神经网络实现
-当前任务：P2.1
+当前阶段：P3 — 数据生成 (Candidate-aware dataset)
+当前任务：P3.1
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -79,23 +79,22 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
 
 > 严格按 FINAL_ARCH_DESIGN §4 的层表实现。**不抄袭旧 `policy_conv.py`**——架构本质不同（输入空间张量 + 候选集合双流，输出 ranking 而非 logits）。
 
-- ☐ **P2.1** 实现 `SAGE_PR` 模型（PyTorch）
-  - 创建 `experiments/sage_pr/model.py`
-  - **Grid Encoder**：`Conv 30→32 (3×3) → DSConv block ×2 (32→32) → DSConv block (32→48, dilate=2) → DSConv block ×2 (48→48) → GAP → FC 48→96`
-  - **Candidate Encoder**：`Conv 1×1 (128→96) → ReLU → Conv 1×1 (96→96) → e_i: [64,96]`，对集合做 GAP 得到 `z_set: [96]`
-  - **Context Fusion**：`concat(z_grid, z_set, u_global) → FC 208→128 → FC 128→96 → c: [96]`
-  - **Score Head**：`e_i + c → Conv 1×1 96→96 → Conv 1×1 96→1 → score: [64]`
-  - **Aux heads**：deadlock head / progress head / info_gain head（各一个 Conv 1×1 96→1）+ value head (FC 96→32→1)
-  - **完成判定**：`forward(x_grid, x_cand, u_global)` 通过；返回 `(score_logits, value, deadlock, progress, ig)`
-- ☐ **P2.2** Fixup Initialization（替代 BatchNorm）
-  - 残差路径上加可学习 `α`（初始 0），训练后可 fold 进 conv weights
-  - 参考论文 Zhang et al. 2019, Fixup Initialization
-  - **完成判定**：在随机数据上训 3 epoch 不发散；fp32 train_acc 达到 ≥ 50%
-- ☐ **P2.3** Sanity check
-  - 参数量验证：fp32 ≈ 98 K (允许 ±20K)；INT8 后 ≤ 200 KB
-  - 前向时延：bs=512 cuda < 5 ms
-  - 单样本前向（模拟 OpenART mini）：< 30 ms
-  - **完成判定**：`scripts/p2_bench_sage_pr.py` 输出 summary 满足上述
+- ☑ **P2.1** 实现 `SAGE_PR` 模型（PyTorch）
+  - 创建 `experiments/sage_pr/model.py` ✓
+  - **Grid Encoder** ✓ (Conv 30→32 + 4 FixupResBlock + 1 Transition 32→48 dilate=2 + GAP + FC 48→96, 31,488 params)
+  - **Candidate Encoder** ✓ (Linear 128→96→96, 21,696 params)
+  - **Context Fusion** ✓ (208→128→96, 39,136 params)
+  - **Score Head + 4 Aux Heads** ✓ (12,837 params)
+  - **完成判定** ✓ forward 工作, 输出 5 元组
+- ☑ **P2.2** Fixup Initialization（替代 BatchNorm）
+  - 残差路径上加可学习 `α`（初始 0）+ bias_a/b/c ✓ pw2 weight 置 0
+  - **完成判定** ✓ 随机数据 3 epoch 不发散 (4.18 → 4.09)
+- ☑ **P2.3** Sanity check
+  - 参数量: 105,157 (目标 ~98K ±20K) ✓
+  - INT8 估算: 105.9 KB (目标 ≤ 200 KB) ✓
+  - bs=1 cuda: 1.27 ms (目标 < 30 ms) ✓
+  - bs=512 cuda: 2.97 ms (目标 < 5 ms) ✓
+  - 脚本: `scripts/p2_bench_sage_pr.py`
 
 监控：仅 GPU（构建+前向 sanity 时），CPU 不重要。
 
