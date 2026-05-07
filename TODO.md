@@ -1,358 +1,394 @@
-# SmartCar-Sokoban-RL · 训练攻关 TODO
+# SmartCar-Sokoban-RL · SAGE-PR 架构重构 TODO
 
-> **目标**：在 phase 6 全图集上跑出 **deterministic policy 通关率 ≥ 90%** 的小模型（int8 量化后 < 500 KB，可部署 OpenART mini）。
+> **目标**：在 phase 1-5 上跑出 **deterministic 通关率 ≥ 95%**、phase 6 ≥ **90%**，模型 int8 量化后 ≤ 500 KB、OpenART mini 单次推理 ≤ 50 ms、量化损失 ≤ 2pp。
 >
-> **终止条件**：上一条不达成，**不能停止迭代**。任何一次评估指标低于 90% 就回到下面"故障排查表"找下一步动作，永远有事可做。
+> **本轮迭代重点**：放弃当前 baseline (hybrid CNN + flat MLP + 54-类 softmax)，按 **`docs/FINAL_ARCH_DESIGN.md`** 中的 **SAGE-PR** 架构（Symbolic-Aided Grid-Equivariant Policy Ranker）重新实现状态层、候选生成器、神经评分器、训练范式与部署路径。
+>
+> **终止条件**：目标未达成不能停止迭代。任何一次评估低于目标就回 §7 故障排查表挑下一招。
 >
 > **硬件**：Intel Core Ultra 7 265K（20 核 8P+12E）+ NVIDIA RTX 5060 Ti 16 GB。
 >
-> **环境**：所有 python 命令必须在 conda 环境 **`rl`** 下运行。Bash 里用 `conda run -n rl python ...` 或先 `conda activate rl`。
+> **环境**：所有 python 命令在 conda 环境 `rl` 下运行（`conda run -n rl python ...`）。
 >
-> **核心纪律**：每次启动训练 / 数据生成脚本，**必须并行起一个资源监控**（见 §6）。CPU 利用率 <70% 或 GPU 利用率 <50% 时立即停下来诊断瓶颈，不要让脚本空跑浪费时间。
+> **核心纪律**：启动任何长跑脚本（数据生成 / 训练 / DAgger / 评估）前必须开 §6 监控；任务期间每 5-10 分钟 grep 监控日志。CPU 长期 < 70% 或 GPU 长期 < 50% 立即停下来诊断瓶颈。
 
 ---
 
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：完成可达极限, 等更多 maps 才能突破
-最后一次评估 (combined v3, conv h=1024, 215K samples):
-  greedy:                          branch search (final):
-  phase 1: 99.41%                  100% (cap 100%)         ✓
-  phase 2: 95.74% ✓                99.6%  (cap 95.2%)      ✓
-  phase 3: 63.73%                  **94.75%** (cap 98%) — 距 95% 仅 0.25pp
-  phase 4: 21.53%                  44.74% (cap 68.9%)
-  phase 5: 35.94%                  61.09% (cap 66.3%)
-  phase 6: 29.84%                  50.77% (cap 66.0%)
-
-⚠️ 结构性限制: phase 4/5/6 verify cap (BestFirst+IDA* 30s 解出比例)
-   分别为 68.9% / 66.3% / 66.0%, 远低于 95%/90% 目标. 这是 map generator
-   产生的图本身有 30%+ 在合理时间内无解, BC 永远无法在这些图上得分.
-
-要达成 phase 1-5 ≥95% / phase 6 ≥90%, 必须:
-  1. 重新生成 phase 4-6 maps, 强制每张图 IDA* 60s 可解
-  2. 或大幅放宽时限 (180s+) 的 verify 看能多救多少
-
-当前 Ralph loop 时间预算内无法达成. 但 BC pipeline 已工作良好,
-Phase 1/2 完美, Phase 3 几乎过线, 验证了"IDA*老师 + Conv 架构 +
-合并训练 + branch search inference"路径.
-最后一次评估时间：2026-05-07 14:00
+当前阶段：P1 — 符号层实现 (Belief State + 候选生成器)
+当前任务：P1.3
+最后一次评估：— (旧 baseline 数字仅作下界参照)
+旧 baseline 上界 (combined v3 + branch search budget=256):
+  phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
+  phase 5 = 61.09% / phase 6 = 50.77%
+最后一次评估时间：—
 ```
 
-> **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把评估数字写进上面三行。
+> **每完成一个任务**：把 ☐ 改成 ☑，更新"当前任务"指针指向下一个未完成项，把最新评估数字写进上面三行。
 
 ---
 
-## 0. 阶段总览（依赖图）
+## 0. 阶段总览（SAGE-PR 实施依赖图）
 
 ```
-P0 基线审计           ─┐
-P1 地图生成器修复      ─┴→ P3 数据集构建 ─┐
-P2 模型架构升级        ──────────────────┴→ P4 BC 训练 ─→ P5 评估 ─→ P6 自我改进迭代 ─→ P7 量化与导出
-                                                          ↑                  │
-                                                          └──── 反馈到 P3 ───┘
+P1 符号层 (Belief + 候选生成器)  ──┐
+                                       ├→ P3 数据生成 (含 candidate features) ──┐
+P2 SAGE-PR 神经网络实现            ──┘                                            ├→ P4 Stage A BC ─→ P5 Stage B DAgger ─→ P6 Stage C QAT ─→ P7 部署 / 集成
+                                                                                  ↑                                                            │
+                                                                                  └── P8 自我改进循环 ←──────────────────────────────────────┘
 ```
 
-P0 / P1 / P2 是前置工作，可以并行。**P5 通关率 < 90% 时永远走 P6 的循环回到 P3**，直到达标才能进 P7。
+P1, P2 可以并行做（各自只需 CPU/GPU、无相互依赖）。  
+P3 必须在 P1 完成后开（候选生成器是 P3 输入的一部分）。  
+P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
 
 ---
 
-## P0 · 基线审计（建立可比指标）
+## P1 · 符号层实现（Belief + 领域特征 + 候选生成器）
 
-> 不知道现在多差，就不知道每一步改进了多少。先把当前底盘的数字钉死。
+> 一切先决条件。神经网络只有在符号层提供高质量结构化输入时才能学好。 
 
-- ☑ **P0.1** 跑一次当前 BC prototype 在 phase 6 上的 baseline (2026-05-07)
-  - 结果：50 图×3 seed，dataset 2043 样本（hybrid 老师：84 solver + 17 autoplayer，49 ep 失败）
-  - 训练 20 epoch，hidden=256，val_acc=64.7%
-  - **rollout win_rate=9.33% (14/150)**，离 90% 目标差 80+ 个百分点
-  - 资源：CPU build 期 87–96%（达标 ≥85%），train 期 GPU 利用率被 5060Ti 上 ~1ms/step 的 FC 跑得起飞，瞬时 50% 但平均较低（数据集太小、20 epoch 仅 30 秒就完）
-  - 命令（重新 build 当前 prototype 的数据 + 训练）：
-    ```bash
-    conda run -n rl python -m experiments.solver_bc.build_dataset \
-      --phase 6 --output .agent/baseline/p6.npz \
-      --seeds-per-map 3 --time-limit 30 --num-workers 16
-    conda run -n rl python -m experiments.solver_bc.train_bc \
-      --dataset .agent/baseline/p6.npz \
-      --output-dir .agent/baseline/p6_run \
-      --device auto --epochs 20 --batch-size 256 --hidden-dim 256
-    conda run -n rl python -m experiments.solver_bc.evaluate_bc \
-      --checkpoint .agent/baseline/p6_run/best.pt --phase 6 --device auto \
-      --rollout-batch-size 64
-    ```
-  - **完成判定**：拿到 phase 6 的 `win_rate / avg_steps` 数字写到本文顶部"最后一次评估"。
-  - 监控：训练时 GPU 利用率应 > 70%（FC-only 模型小，DataLoader 不应是瓶颈，用 `--gpu-resident on`）；数据生成时 CPU 应 90%+。
-- ☑ **P0.2** phase 6 IDA\* 严格最优解 (前 50 图, time_limit=180s, workers=18)
-  - 结果：**50 图仅 25 解 (50%)**，剩 25 图 IDA\* 超时
-  - pushes 分布：[4, 8, 8, 8, 10, 10, 11, 12, 12, 13, 13, 16, 16, 17, 19, 20, 21, 21, 22, 24, 25, 27, 27, 28, 30]
-  - **诊断**：分布严重失衡——phase 6 出现 4/8 推的 trivial 图，又有 50% 让 IDA\* 在 180s 内解不出来。两端都坏。
-  - 写入 `.agent/baseline/phase6_optimal.json`
-  - 资源：18 worker × 平均~7s/图（OK 部分）+ 25×180s 超时占满 = 总 361s 墙钟
-- ☑ **P0.3** RL phase6_best.zip 不存在（RL 从未训到 phase 6，只有 phase 1-5 ckpt），跳过。
+- ☑ **P1.1** 实现 `BeliefState` 类（参考 FINAL_ARCH_DESIGN §2.1）
+  - 字段：`M`、`M_init`、`p_player`、`theta_player`、`boxes`、`targets`、`bombs`、`K`、`Pi`、`visited_fov`、`last_seen_step`
+  - 创建路径：`smartcar_sokoban/symbolic/belief.py`
+  - **完成判定**：单元测试覆盖（reset / 接收 YOLO 识别结果 / FOV 更新 / Π 收缩）✓ tests/test_belief_state.py 17 测试全过
+- ☑ **P1.2** 实现 ID 排除推理（确定性算法，零参数）
+  - `infer_remaining_ids(K, N)`：当 N-1 个 ID 已识别时把第 N 个填入
+  - 集成到 belief 更新管线
+  - **完成判定**：构造 5-箱场景，识别 4 个后第 5 个自动确定 ✓ test_observe_box_triggers_id_inference 通过
+- ☐ **P1.3** 领域特征预计算模块（≤ 2 ms 总耗时，事件触发）
+  - 创建 `smartcar_sokoban/symbolic/features.py`
+  - 实现：`player_bfs_dist`、`reachable_mask`、`push_dist_field`（reverse-push BFS per box）、`push_dir_field`（流场，由距离场梯度推导）、`deadlock_mask`（corner + edge-line 静态死角）、`info_gain_heatmap`（raycasting from candidate viewpoints）
+  - **完成判定**：在 phase 6 平均地图上 benchmark 单次预计算 ≤ 4 ms（含 5 箱）
+- ☐ **P1.4** 候选动作生成器（参考 FINAL_ARCH_DESIGN §3）
+  - 创建 `smartcar_sokoban/symbolic/candidates.py`
+  - 枚举 ≤ 64 个 macro action：
+    - `push_box(i, d, max_run=k)` 多步推送（含 macro 停止条件：拐点 / 死角前 / 距离场拐点）
+    - `push_bomb(k, d)` 含正交 + 4 对角特例
+    - `inspect(viewpoint, heading)` 仅在信息增益 > 0 时生成
+    - `return_garage` 终局可选
+  - 合法性 mask：车可达推位、推链不阻塞、推完不进入死锁、ID 配对约束
+  - **完成判定**：对 50 张随机图，候选数永远 ≤ 64；与引擎实际可执行动作一致（单元测试）
+- ☐ **P1.5** 候选特征向量化（128 维，参考 FINAL_ARCH_DESIGN §3.4）
+  - 类型 one-hot / 对象描述 / 方向 / 配对 Π / 路径代价 / 推送距离场差分 / 死锁 / 炸弹特征 / 信息增益
+  - **完成判定**：candidate feature builder 输出 shape `[64, 128]`，缺位 padding 为 0；类型分布合理（人工抽查 5 张图）
 
----
-
-## P1 · 地图生成器修复（输入数据质量）
-
-> "垃圾输入垃圾输出"。这一阶段不达标就别开始 P3。
-
-- ☑ **P1.1** 诊断完成，报告 `.agent/diag/map_gen.md`
-  - **核心发现**：所有生成器用 BestFirst (6-18s) 当解器，**没有 IDA\* 时限闸**
-  - **过滤的是步数（车走 + 推），不是推数**——所以 phase 6 出现 4 推但 30 步的伪难图
-  - 1010 张 _NNNN.txt 里仅 10 张 _NN.txt 在 manifest，其他 1000 张无 verified seed
-  - phase 6 是 50% phase4-fast + 50% phase5-compact 的简单并集，难度无分层
-  - 修复方案：P1.2 写 `verify_optimal.py` 加 IDA\* 60s 闸 + 推数闸；P1.3 对现有图全过一遍
-- ☐ **P1.2** 写一个 `verify_optimal.py`，对每张图：
-  - 跑 `MultiBoxSolver(strategy='ida', time_limit=60)`，要求**找到最优解**才算通过
-  - 跑 AutoPlayer 必须也能解（不能解的图过难）
-  - 推数 ≥ 阈值（phase 1: ≥ 3, phase 6: ≥ 15），过滤 trivial 图
-  - 用 `ProcessPoolExecutor(max_workers=18)`
-  - 监控：CPU 必须 90%+。低于 70% 检查 worker 数 / 是否被 GIL 锁。
-- ☐ **P1.3** 重新生成 phase 1–6 各 **1000 张验证过的图**（共 6000 张），每张图带 ≥ 5 个验证可解的 seed
-  - 推数分布要均匀：phase 6 应该有 15/20/25/30+ 推的图，不能扎堆
-  - 写到 `assets/maps_v2/phase{N}/` 下，**不要覆盖现有 `assets/maps/`**，先 A/B 对比
-  - 监控：长时间（预计数小时）的批量任务，确保 CPU > 85% 且没有少数 worker 拖后腿
-  - **完成判定**：6000 张图全部通过 P1.2 验证；推数分布直方图（写入 `.agent/diag/maps_v2_dist.png` 或 .json）合理。
+监控：`scripts/monitor_resources.py --tag p1_test`。CPU 期望低（仅单元测试），GPU 期望 0%。
 
 ---
 
-## P2 · 模型架构升级
+## P2 · SAGE-PR 神经网络实现
 
-> 当前 145 K 纯 FC 不够。把容量花在墙体的卷积上。
+> 严格按 FINAL_ARCH_DESIGN §4 的层表实现。**不抄袭旧 `policy_conv.py`**——架构本质不同（输入空间张量 + 候选集合双流，输出 ranking 而非 logits）。
 
-- ☑ **P2.1 / P2.2 / P2.3** (2026-05-07)
-  - `experiments/solver_bc/policy_conv.py`: MaskedConvBCPolicy 实现
-    - 架构：walls → Conv2D(1→16, 3x3) → ReLU → Conv2D(16→32, 3x3, stride=2) → ReLU → Flatten(1536) → FC(64) → ReLU → concat 实体 62 维 → FC(256→256→54)
-    - **215 K params**, hidden_dim=256 默认, TFLM 友好（仅 Conv2D / FC / ReLU / Reshape / Concat）
-  - `train_bc.py` 加 `--policy {mlp,conv}` + `--wall-emb-dim`，checkpoint 记录 policy / wall_emb_dim
-  - `evaluate_bc.py` / `branch_search.py` / `self_improve_loop.py` 都按 `payload['policy']` 分派
-  - Bench: bs=512 cuda forward **0.32 ms** ✓ (<5 ms 目标)
-  - 冒烟训练通过 (5 epoch, val_acc 49.5%, 跟 mlp 同样 small dataset 接近)
+- ☐ **P2.1** 实现 `SAGE_PR` 模型（PyTorch）
+  - 创建 `experiments/sage_pr/model.py`
+  - **Grid Encoder**：`Conv 30→32 (3×3) → DSConv block ×2 (32→32) → DSConv block (32→48, dilate=2) → DSConv block ×2 (48→48) → GAP → FC 48→96`
+  - **Candidate Encoder**：`Conv 1×1 (128→96) → ReLU → Conv 1×1 (96→96) → e_i: [64,96]`，对集合做 GAP 得到 `z_set: [96]`
+  - **Context Fusion**：`concat(z_grid, z_set, u_global) → FC 208→128 → FC 128→96 → c: [96]`
+  - **Score Head**：`e_i + c → Conv 1×1 96→96 → Conv 1×1 96→1 → score: [64]`
+  - **Aux heads**：deadlock head / progress head / info_gain head（各一个 Conv 1×1 96→1）+ value head (FC 96→32→1)
+  - **完成判定**：`forward(x_grid, x_cand, u_global)` 通过；返回 `(score_logits, value, deadlock, progress, ig)`
+- ☐ **P2.2** Fixup Initialization（替代 BatchNorm）
+  - 残差路径上加可学习 `α`（初始 0），训练后可 fold 进 conv weights
+  - 参考论文 Zhang et al. 2019, Fixup Initialization
+  - **完成判定**：在随机数据上训 3 epoch 不发散；fp32 train_acc 达到 ≥ 50%
+- ☐ **P2.3** Sanity check
+  - 参数量验证：fp32 ≈ 98 K (允许 ±20K)；INT8 后 ≤ 200 KB
+  - 前向时延：bs=512 cuda < 5 ms
+  - 单样本前向（模拟 OpenART mini）：< 30 ms
+  - **完成判定**：`scripts/p2_bench_sage_pr.py` 输出 summary 满足上述
 
-### 原始方案保留供参考
-- ☐ **P2.1** 在 `experiments/solver_bc/` 下新建 `policy_conv.py`，实现：
-  ```
-  墙体 16×12 → Conv(1→16, 3×3) → ReLU → Conv(16→32, 3×3) → ReLU
-            → Flatten → Linear(...→64)        ← 空间嵌入
-  实体 62 维 ──────────────────────────────────┐
-                                                 concat → Linear(126→256) → ReLU
-                                                       → Linear(256→256) → ReLU
-                                                       → Linear(256→54)
-  ```
-  - 严格只用 TFLite Micro 支持的 op：`Conv2D / FullyConnected / ReLU / Reshape`，不要 LayerNorm / Dropout / Attention
-  - 输入要从扁平 254 维拆出 `(walls_16x12, entities_62)`，加个 `split_obs(obs)` 工具
-- ☐ **P2.2** 让 `train_bc.py` 支持新策略选择：`--policy {mlp, conv}`
-- ☐ **P2.3** 单步前向 sanity check：在 GPU 上跑一个 batch=512 的前向，验证显存占用 < 1 GB、单步 < 5 ms。
-  - **完成判定**：模型能跑通、参数数量 ≈ 110–500 K（拍照写到 `.agent/diag/policy_conv_summary.txt`）
+监控：仅 GPU（构建+前向 sanity 时），CPU 不重要。
 
 ---
 
-## P3 · 数据集构建（IDA\* 严格最优老师）
+## P3 · 数据生成（Candidate-aware dataset）
 
-- ☐ **P3.1** 改 `experiments/solver_bc/teachers.py`：
-  - `_solver_action_sequence` 把 `advise_exact_high_level` 的 `time_limit` 加大（比如 120 s），并改成 `strategy='ida'`（如果不暴露就在 `high_level_teacher.py` 加一层）
-  - 让 hybrid 老师**不再回退到 AutoPlayer 拿 BC 数据**——AutoPlayer 不是最优解，会污染监督信号
-  - 改成：IDA\* 失败的 episode 直接丢弃，记到日志
-- ☐ **P3.2** 重建数据集（用 P1.3 的 `maps_v2`）
-  - 每个 phase: 1000 图 × 5 seed = 5000 episode
-  - 命令模板：
-    ```bash
-    conda run -n rl python -m experiments.solver_bc.build_dataset \
-      --phase 6 --output .agent/data/p6_v2.npz \
-      --seeds-per-map 5 --time-limit 120 --max-cost 200 \
-      --teacher solver \
-      --num-workers 18
-    ```
-  - 监控：CPU 必须 90%+，否则诊断（worker 之间 IDA\* 时间方差大可能让某些核空转，可以加任务粒度切分）
-  - **完成判定**：每个 phase 至少 100 K (state, action) 样本；老师成功率 ≥ 95%。生成 `.agent/data/p{N}_v2.json` 摘要。
-- ☐ **P3.3** 数据集合并 + 分层（保留 phase 标签作为辅助分析维度）：
-  - 输出 `.agent/data/all_v2.npz`（≈ 600 K 样本）
-  - 数据集本身预计 < 500 MB，可以全量 GPU resident（5060 Ti 16 GB）
+> 数据格式必须跟 SAGE-PR 输入对齐：每个样本包含 `(X_grid, X_cand, u_global, mask, soft_q_label)`。**不能直接用旧 `phase{N}_v2.npz`**——那是为旧 54-类 head 准备的，候选格式完全不同。
 
----
+- ☐ **P3.1** 重写 `build_dataset_v3.py`，支持 candidate-aware 输出
+  - 创建 `experiments/sage_pr/build_dataset_v3.py`
+  - 每步从 belief state 调 P1.4 候选生成器，得到 `[64, 128]` 候选张量
+  - 每步用 P1.3 领域特征预计算填 `X_grid: [10, 14, 30]`
+  - 老师标签：用 IDA* / BestFirst 求解器找出"专家会选哪个候选"
+  - **完成判定**：对 phase 1（10 张图 × 3 seed）build 出来的 npz 包含正确 keys；shape 对；mask 正确
+- ☐ **P3.2** 多老师质量分派（参考 FINAL_ARCH_DESIGN §5.6）
+  - phase 1-3 + phase 4 verified-seed → IDA*（loss 权重 1.0）
+  - phase 4-6 主体 → BestFirst（loss 权重 0.8）
+  - 探索 / 入库 / 紧急回退 → AutoPlayer（loss 权重 0.4）
+  - DAgger 修正 → IDA* 或 BestFirst（loss 权重 1.5）
+  - 在样本元数据里记录每条来自哪个老师
+- ☐ **P3.3** Soft Q label 生成（参考 FINAL_ARCH_DESIGN §5.2）
+  - 对每个候选 a_i 计算 `Q*(s, a_i) = c(s, a_i) + V*(T(s, a_i))`
+  - 不在专家轨迹中的候选用 BestFirst 估 Q（每候选 ≤ 5 s 时限）
+  - 标签 = `softmax(-Q* / τ)`，τ = 0.5
+  - 多个近似最优动作不会在 loss 中互相对立
+- ☐ **P3.4** Hard negative 挖掘
+  - 对每个 (s, a*)，采样 K=4 个反事实负例：
+    - 推入死角的合法动作
+    - 把箱子推离目标的动作
+    - 未识别 ID 时贸然推送
+    - 错误爆破方向
+  - 标记为 `is_hard_neg=True`，用于 ranking loss
+- ☐ **P3.5** 数据增强 pipeline
+  - **D₂ 几何增强**（4 元素：identity / hflip / vflip / 180°）。**不做** 90° 旋转（14×10 不是正方）。同步变换 player 朝向、候选位置/方向。
+  - **ID 重命名增强**：每 batch 随机 σ ∈ S_10 置换 box class_id + target num_id
+  - **部分可观测性增强**：随机 mask p ∈ [0.1, 0.4] 已识别实体回 unknown
+  - 在 `train_sage_pr.py` 的 DataLoader 里在线触发
+  - **完成判定**：增强后 batch 里实体顺序、ID 都随机
+- ☐ **P3.6** 全 phase 数据生成
+  - phase 1-6 各 ~1000 张已 verified 图 × 3 ID seed = 18000 episodes
+  - 每 episode ~25 actions = ~450K (s, a, candidates) 样本
+  - 监控：CPU ≥ 85%、4-12 worker、IDA* time_limit 60 s
+  - 输出：`.agent/sage_pr/dataset_v3.npz`（含 obs / cand / mask / soft_q / hard_neg flags / phase / source）
+  - **完成判定**：总样本 ≥ 350K；各 phase 至少 50K；各老师占比与 P3.2 一致
 
-## P4 · BC 训练（吃满 GPU）
-
-- ☐ **P4.1** 训练 baseline conv 策略
-  - 命令：
-    ```bash
-    conda run -n rl python -m experiments.solver_bc.train_bc \
-      --dataset .agent/data/all_v2.npz \
-      --output-dir .agent/runs/conv_h256 \
-      --policy conv --hidden-dim 256 \
-      --epochs 80 --batch-size 1024 --lr 5e-4 \
-      --device auto --gpu-resident on
-    ```
-  - **资源目标**：
-    - GPU util **>= 80%**（nvidia-smi 监控）
-    - VRAM 占用 < 14 GB
-    - 单 epoch < 60 s（600 K 样本 × bs 1024 = ~600 step，~30 ms/step）
-  - 如果 GPU < 50%：先增大 batch_size 到 2048 / 4096，再开 `torch.compile(model)`，再排查 DataLoader（应该已经 GPU resident）。
-- ☐ **P4.2** 跑一组超参 sweep
-  - 网格：`hidden ∈ {256, 512}`，`epochs ∈ {80, 200}`，`lr ∈ {1e-3, 5e-4, 1e-4}`
-  - **同时只跑 1 组**（GPU 是单卡），跑完用 P5 评估，记录到 `.agent/runs/sweep.json`
-  - 每组训练前先 `nvidia-smi --query-gpu=memory.used --format=csv` 看 VRAM 是不是干净
-- ☐ **P4.3** 选当前最佳 checkpoint 进入 P5
+监控期望 §6.2：CPU ≥ 85% / GPU 0%（纯 CPU 老师调用）。
 
 ---
 
-## P5 · 评估
+## P4 · Stage A — BC 预训练
 
-- ☐ **P5.1** 全 phase deterministic 评估
-  - 命令：
-    ```bash
-    conda run -n rl python -m experiments.solver_bc.evaluate_bc \
-      --checkpoint .agent/runs/<best>/best.pt \
-      --phase 6 --device auto --rollout-batch-size 256
-    ```
-  - 同样跑 phase 1/2/3/4/5 / 6 各一次，结果写入 `.agent/eval/<run>.json`
-  - 把 phase 6 win_rate 写到本文顶部"最后一次评估"
-- ☐ **P5.2** 失败地图归类
-  - 列出 phase 6 中 win_rate < 100% 的图集
-  - 写入 `.agent/eval/<run>_weak.json`
-- ☐ **P5.3** **达标判断**
-  - **phase 6 win_rate ≥ 90%** 且 **phase 1–5 win_rate ≥ 95%**：进 P7
-  - 否则：进 P6
+- ☐ **P4.1** 实现 `train_sage_pr.py` Stage A 训练
+  - 损失：`L = L_policy + 0.5·L_ranking + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress + 0.1·L_info`
+  - 优化：AdamW lr=3e-4 cosine 到 3e-5、batch 256、weight decay 1e-4、grad clip 1.0
+  - 80 epoch，phase-stratified sampling（5/10/15/25/20/25%）
+  - **完成判定**：train_loss 收敛，val_acc ≥ 95% on phase 1-3 集
+- ☐ **P4.2** 全 phase deterministic eval
+  - 创建 `evaluate_sage_pr.py`
+  - 对每个 phase 跑全图 × 3 seed deterministic（无 beam search）
+  - 输出 phase 1-6 win_rate
+  - **完成判定**：拿到所有 phase 数字写到顶部"最后一次评估"
+- ☐ **P4.3** 对照旧 baseline
+  - phase 4-6 greedy win_rate 应 ≥ 旧 baseline 的 +15pp（架构换代基础收益）
+  - 若达不到，检查 belief state、候选生成器、特征通道是否有 bug
+  - 监控：GPU ≥ 80% during train、CPU ≥ 50% during eval
 
----
-
-## P6 · 自我改进循环（直到达标）
-
-> 这是主循环。每跑一遍 P6 就触发一次 P3→P4→P5。**永远不会跳过这一节直到达标**。
-
-每轮迭代必须做：
-
-- ☐ **P6.1** 弱图 branch search
-  - 取 P5.2 的 weak maps，对每张图 × 多 seed 跑 `branch_search.py`：
-    ```bash
-    conda run -n rl python -m experiments.solver_bc.branch_search \
-      --checkpoint <best.pt> --phase 6 \
-      --map-filter <weak_map> --seeds-per-map 8 \
-      --branch-budget 256 --branches-per-rollout 16 \
-      --rollout-batch-size 64 \
-      --output-npz .agent/data/improve_iter{N}.npz \
-      --output-json .agent/data/improve_iter{N}.json \
-      --device auto
-    ```
-  - 监控：GPU rollout 时利用率应 > 60%（注意 branch_search 有 CPU 串行调度，不会 100%）
-- ☐ **P6.2** 把改进的 trajectory 拼回主数据集
-  - `np.savez_compressed(.agent/data/all_v3.npz, ...)`
-  - 检查样本数有显著增加（< 1% 说明 branch search 没找到改进，要换策略：调大 budget 或先跑下面 P6.3）
-- ☐ **P6.3** 重训
-  - 用同 P4 的命令，`--dataset .agent/data/all_v{N+1}.npz`
-  - 输出到 `.agent/runs/conv_iter{N}`
-- ☐ **P6.4** 重评估（同 P5）→ 更新顶部"最后一次评估"
-- ☐ **P6.5** 终止判断
-  - 达标：跳出循环 → P7
-  - 未达标但有进步（比上轮高 ≥ 1%）：迭代次数 +1，回 P6.1
-  - **未达标且连续 2 轮没进步**：触发"故障排查表"§7
+资源期望 §6.2：训练时 GPU 主导（≥ 80%）、评估时 CPU 主导（≥ 70%）。
 
 ---
 
-## P7 · 量化与导出
+## P5 · Stage B — DAgger 在线纠偏
 
-> 仅在 P5/P6 达标后做。
+- ☐ **P5.1** 实现 DAgger 循环
+  - 创建 `experiments/sage_pr/dagger_loop.py`
+  - 每轮：
+    - 用当前模型在 200 张 verify-seed 难图上 deterministic rollout
+    - 收集（a）失败前 5-20 步状态（b）low-confidence 状态（max π < 0.4）（c）deadlock 前状态
+    - 用 BestFirst（极端难图夜间用 IDA*）给标签
+    - 加入 replay buffer（max 5×10⁴）
+    - 在 buffer 上 fine-tune 3 epoch
+- ☐ **P5.2** DAgger 3-5 轮
+  - 每轮用 4-12 worker 并行 rollout + label
+  - 监控 phase 4-6 win_rate 每轮提升趋势
+  - **完成判定**：phase 6 提升至少 +5pp / phase 4-5 提升至少 +3pp
+- ☐ **P5.3** Hard-state 重训权重
+  - DAgger 修正样本 loss 权重 1.5（比常规 1.0 重）
+  - 失败 phase 6 含炸弹 trajectory 上采样 ×3
 
-- ☐ **P7.1** PyTorch → ONNX
-  - `torch.onnx.export(...)`，opset 13+
-- ☐ **P7.2** ONNX → TFLite int8（用 onnx2tf 或 TFLiteConverter + representative dataset）
-  - representative dataset 用训练集的 1024 个样本
-- ☐ **P7.3** 量化精度回归
-  - 在 PC 上用 tflite_runtime 跑 P5 同样的评估
-  - **要求**：phase 6 win_rate 下降 ≤ 2%
-  - 否则回 P7.2 调（试 per-channel quantization、提高校准样本数）
-- ☐ **P7.4** 部署文件打包到 `runs/deploy/<date>/`：`policy.tflite + labels + obs_layout.md`
+资源期望：CPU ≥ 80%（rollout + 求解器），GPU 训练时段 ≥ 70%。
+
+---
+
+## P6 · Stage C — QAT 量化感知训练
+
+- ☐ **P6.1** 插入 fake quant ops
+  - PyTorch `torch.ao.quantization` API
+  - per-channel symmetric INT8 for weights
+  - per-tensor asymmetric INT8 for activations
+  - Policy logits & Value 输出保 INT16
+- ☐ **P6.2** 校准集（representative dataset）
+  - ~500 张 hard states，覆盖各 phase + 边界 case（炸弹、未识别 ID、死锁前）
+- ☐ **P6.3** QAT fine-tune 10 epoch
+  - lr 5e-5 fixed
+  - 加 ranking margin loss：`L_margin = max(0, δ_q - (score(a*) - score(a-)))`
+- ☐ **P6.4** INT8 vs fp32 win_rate gap 验证
+  - **完成判定**：gap ≤ 2pp（RFC §6.4 硬约束）
+  - 若超过，加深 QAT 至 15 epoch + 增加校准样本
+- ☐ **P6.5** 导出 `.tflite` 文件
+  - 验证只用 RFC §4.4 允许的 op：Conv2D / DepthwiseConv2D / FullyConnected / ReLU / Reshape / Concat / Add / AvgPool2D / Softmax
+  - **完成判定**：`.tflite` 文件 ≤ 200 KB，无禁用 op
+
+资源期望：GPU ≥ 70%、CPU 1-2 核（DataLoader）。
+
+---
+
+## P7 · 部署 / 系统集成
+
+- ☐ **P7.1** TFLite Micro 实测时延
+  - 在 OpenART mini 上跑 `.tflite`，测 100 次推理平均
+  - **完成判定**：平均 ≤ 50 ms，p99 ≤ 80 ms
+  - 若超时：通道宽度 32 → 24 / 减一个 ResBlock / 加 stride=2 下采样
+- ☐ **P7.2** 与 YOLO + 传统 CV 集成
+  - 主循环：抓帧 → YOLO（仅未识别实体进 FOV 时）→ AprilTag/CV → belief 更新 → 候选生成 → SAGE-PR → BFS → 电机
+  - **事件触发推理**：SAGE-PR 仅在车到达格中心 / 完成推送 / 新 ID 识别 / 炸弹爆炸 时跑
+  - **完成判定**：100 帧主循环平均 ≤ 200 ms
+- ☐ **P7.3** TFLite 双 Interpreter vs 手写 CMSIS-NN（备选）
+  - **首选**：YOLO + SAGE-PR 各自独立 Interpreter / 独立 arena
+  - **如果 mini 上冲突**：把 SAGE-PR 改手写 INT8 推理（DSConv + FC + 1×1 Conv，~200 行 C 调 CMSIS-NN）
+  - 触发条件：mini 实测 OOM 或 driver 错误
+- ☐ **P7.4** 浅层 beam search 推理（可选）
+  - 触发条件：top-1 与 top-2 logit 差 < 0.5 / deadlock head > 0.3 / value head < 0
+  - B=3, D=3，符号模拟器演 macro action
+  - 评分公式：`J = -Σ α·log π + λ_v·V + λ_d·1{死锁} - λ_i·IG`
+  - **完成判定**：触发率 ≤ 30%，平均决策延迟仍 ≤ 100 ms
+
+---
+
+## P8 · 自我改进循环（达标前永远走这里）
+
+> 主循环。phase 1-5 < 95% 或 phase 6 < 90% 就回这里，按 §7 故障排查表挑下一步动作，永远不停。
+
+- ☐ **P8.1** 弱图 branch search 收集
+  - 取 P5 / P6 eval 中 win_rate < 50% 的图
+  - 每图跑 budget=128 branch search，把成功 trajectory 加入数据集
+  - 弱图 + 失败 trajectory 重训
+- ☐ **P8.2** 终止判断
+  - phase 1-5 全 ≥ 95% 且 phase 6 ≥ 90% 且 INT8 损失 ≤ 2pp → 进 P7 量化导出（如未做）
+  - 任一未达标且连续 2 轮无进步 → §7 故障排查表挑下一招
+  - 同一招连续用 2 次未见效 → 切别的招
 
 ---
 
 ## 6. 资源监控规范（**强制**）
 
-每次跑长时间任务（数据生成 / 训练 / branch search），**前 60 秒内必须开监控**。任意一项不达标 → 停下来诊断。
+每次跑训练 / 数据生成 / DAgger / 评估，前 60 秒内必须开监控。任意一项不达标 → 停下来诊断。
 
-### 6.1 监控命令模板
-
-新开一个 shell（或同一脚本背景），每 5 秒打印一次：
+### 6.1 监控命令
 
 ```bash
-# 综合（长跑用）
-nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu \
-           --format=csv -l 5 > .agent/monitor/gpu_$(date +%Y%m%d_%H%M).log &
-
-# CPU（PowerShell 也行）
-typeperf "\Processor(_Total)\% Processor Time" -si 5 -sc 720 \
-  > .agent/monitor/cpu_$(date +%Y%m%d_%H%M).log &
+conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 5 \
+  > /dev/null &  # 后台跑，写到 .agent/monitor/
 ```
 
-或者一行总结脚本（推荐写到 `scripts/monitor_resources.py`）：每 5 s 打印一行 `t=... cpu=__% gpu=__% vram=__/16GB ram=__GB`，方便 loop agent grep。
+### 6.2 阈值表
 
-### 6.2 阈值与对策
-
-| 任务类型 | CPU 目标 | GPU 目标 | 不达标时排查 |
+| 任务类型 | CPU 目标 | GPU 目标 | 不达标排查 |
 |---|---|---|---|
-| 地图生成 / 验证 / 数据集构建 | **≥ 85%** | < 5% | worker 数太少？IDA\* 时间方差导致少数核拖尾？任务粒度太大？尝试把每个 worker 的 batch 拆细 |
-| BC 训练 | 1–2 核满 | **≥ 80%** | DataLoader 瓶颈？打开 `--gpu-resident on`；batch_size 太小？翻倍；模型太小？开 `torch.compile`；CPU 预处理在 hot path 上？挪到 GPU |
-| Branch search rollout | 50%+ | 50%+ | 增大 `--rollout-batch-size`；切到 `--rollout-backend gpu`（见 `experiments/gpu_sim/`） |
-| 评估 (evaluate_bc) | 50%+ | 50%+ | 增大 `--rollout-batch-size`；评估并行化 |
+| 数据生成 (P3) | ≥ 85% | < 5% | worker 太少？IDA* time 方差导致少数核拖尾？任务粒度大？ |
+| BC 训练 (P4) | 1-2 核满 | ≥ 80% | DataLoader 瓶颈？打开 `--gpu-resident on`；batch 太小翻倍；`torch.compile` |
+| DAgger (P5) | ≥ 70% | 训练时段 ≥ 70% | rollout 跟训练交替时 GPU 闲，错峰调度 |
+| QAT (P6) | 1-2 核满 | ≥ 70% | DataLoader / fake quant 开销过大 |
+| 评估 (P4.2/P5.2) | 50%+ | 50%+ | 增大 `--rollout-batch-size`；并行多 worker |
 
-### 6.3 长跑健康检查（每 30 分钟一次）
+### 6.3 长跑健康检查（每 30 分钟）
 
-- VRAM 增长是否正常（应该平稳，持续上涨可能 OOM）
-- 训练 loss 是否在下降（连续 3 epoch 同水平 → 学习率太低 / batch 太小）
-- GPU 温度 < 80°C（5060 Ti 没问题，但记录一下）
+- VRAM 增长是否平稳（持续上涨可能 OOM）
+- 训练 loss 是否仍在下降（连续 3 epoch 同水平 → 学习率 / batch 调整）
+- GPU 温度 < 80°C
 
 ---
 
-## 7. 故障排查表（**主循环卡住时查这里**）
+## 7. 故障排查表（主循环卡住时查这里）
 
-> 进入 P6 第二轮之后没有进步、或某个具体指标卡住时，按下面顺序排查。
+### 7.1 phase 1-3 < 95%
 
-### 7.1 win_rate 在 60–75% 区间卡住
+- 候选生成器 bug？检查合法 mask（P1.4 单元测试）
+- belief state 更新错误？打印 trajectory 看 ID 解推
+- soft Q label 失真？降温 τ 0.5 → 0.3 让多个候选概率拉开
+- D₂ 增强是否同步变换了候选位置 + 推送方向？
 
-- 检查老师质量：随机抽 10 张 phase 6 弱图，手动用 `preview_failed.py --solver exact` 看 IDA\* 解法是否合理
-- 检查数据集多样性：每张图的 seed 是否真的产生不同初始状态？（`seed` 影响箱子初始位置）
-- 加大模型容量：`--hidden-dim 512`，加一层 ResBlock
-- 加 augmentation：训练时随机左右镜像（同时镜像 obs 的墙体维度和动作的左右）
+### 7.2 phase 4-5 卡 70-85%
 
-### 7.2 win_rate 在 80–88% 区间卡住
+- DAgger 不够？多跑 2 轮 + 上采样失败状态
+- Candidate feature 缺关键信号？加 `match_entropy / blast_gain / push_dir_gradient` 通道
+- 检查 hard negative 是否覆盖典型死锁模式（推入角、推链锁死）
+- value head 训练信号弱？加重 `λ_value` 0.3 → 0.5
 
-- 用 `branch_search` 配 `--branch-budget 1024 --branches-per-rollout 32` 加大搜索深度
-- 部署时考虑 inference-time top-k 兜底（在 OpenART 端选 top-2 动作分别 rollout 一步看哪个不死锁）—— 这是 P7 后的部署优化，但训练阶段可以先在 PC 上验证有效性
-- 检查 distribution shift：把 BC 推理时遇到的"专家从未见过的状态"采集回来 → 这正是 self_improve_loop 该做的
+### 7.3 phase 6 卡 70-85%（炸弹时序问题）
 
-### 7.3 训练 loss 不降
+- Plan B：单独训 BombValueHead
+  - 输入：炸弹位置 + 内墙拓扑（10×14×3）
+  - 输出：每个炸弹的"爆破后连通分量增益"
+  - 主网络的炸弹候选评分加这个 head 做 bonus
+- 触发 beam search 时 D=4（深一层）
+- 训练时上采样 phase 6 含炸弹 trajectory ×5
 
-- 学习率太大（NaN）/ 太小（卡 plateau）
-- 数据集严重不平衡（某动作占 80%）：检查 `np.bincount(actions)`
-- mask 用错（loss 在算非法动作上的损失）
+### 7.4 INT8 量化损失 > 2pp
 
-### 7.4 GPU 利用率永远 < 50%
+- QAT epoch 加深至 15-20
+- representative 校准集补 hard cases
+- ranking margin loss 加重
+- 部署用 top-3 beam search 抵消 logit 量化扰动
 
-- 模型太小：当前 conv 网络确实小，但开 `torch.compile` 应该能拉到 70%+
-- batch_size 太小：先翻倍到 2048
-- 数据每 step 都从 CPU 拷贝：`--gpu-resident on`
-- 真的瓶颈在 host：用 `torch.profiler` 抓一段看
+### 7.5 GPU 利用率 < 50%
 
-### 7.5 数据生成阶段，少数 worker 跑得慢
+- batch 翻倍至 512 / 1024
+- `--gpu-resident on`
+- `torch.compile(model, mode='reduce-overhead')`
+- DataLoader num_workers 增加
 
-- IDA\* 在难图上会把 60–120 s 全用满，简单图几秒就完
-- 把生成任务按"每图独立"投递，而不是每 worker 一批图
-- 极难图（IDA\* 5 分钟还没解）直接丢弃，回 P1.3 重生成
+### 7.6 CPU 利用率 < 70% during 数据生成
+
+- worker 池太小：`--num-workers 18`
+- IDA* 时间方差大：拆细任务粒度（每 worker 处理单 episode 而非批）
+- 求解器超时丢弃：检查 `time_limit` 是否过短
+
+### 7.7 OpenART mini 实测时延 > 50 ms
+
+- 通道 32 → 24，参数减 40%
+- 减一个 ResBlock
+- AvgPool 之前加 stride=2 下采样到 5×7
+- 改手写 CMSIS-NN（绕 TFLM overhead）
 
 ---
 
 ## 8. 已完成 / 已知数字
 
-> 每次完成一个任务把数字补到这里，方便后续复盘。
+> 每完成一个里程碑把数字补到这里，方便后续复盘。
 
 | 时间 | 阶段 | 结果 |
 |---|---|---|
-| — | — | — |
+| 2026-05-07 | 旧 baseline (combined v3 + branch budget=256) | phase 1=100%, 2=99.6%, 3=95.25%, 4=44.74%, 5=61.09%, 6=50.77%（仅作起点参照） |
+| — | P1 完成 | — |
+| — | P4 Stage A 完成 | — |
+| — | P5 DAgger 完成 | — |
+| — | P6 QAT 完成 | — |
 
 ---
 
 ## 9. 不做的事（避免跑偏）
 
-- **不要**改引擎物理（推链、爆炸、配对规则）—— 这是赛题规则的复刻
-- **不要**为了拉高 win_rate 而把困难地图剔出训练集
-- **不要**部署没量化的 fp32 模型到 OpenART
-- **不要**在 phase 6 上达标 90% 就停下，要先验证 phase 1–5 也都 ≥ 95%
-- **不要**关掉 action mask（哪怕在 OpenART 上也要保留 mask 推理）
+- **不要**改引擎物理（推链、爆炸、配对、对角推墙特例）— 这些是赛题规则的复刻
+- **不要**为了拉高 win_rate 把困难地图剔出训练集 / 评估集
+- **不要**部署 fp32 模型到 OpenART
+- **不要**phase 6 达标 90% 就停 — 还要确认 phase 1-5 都 ≥ 95%
+- **不要**关掉 candidate mask（合法性约束哪怕在 OpenART 上也必须保留）
+- **不要**让神经网络学逻辑可枚举的事（合法性、死角、ID 排除、BFS） — 那些经典算法做
+- **不要**复用旧 `policy_conv.py` 或旧 `train_bc.py`，新架构必须新代码（避免接口耦合）
+- **不要**用 RFC §4.4 禁止的 op（LSTM / GRU / Attention / 动态 BatchNorm）
+- **不要**为了"让模型更通用"而做 90° 旋转增强（地图 14×10 不是正方）
+- **不要**让 YOLO + SAGE-PR 共享同一个 TFLite arena（K230 教训：driver 冲突）
+
+---
+
+## 附录 A：关键设计参考
+
+| 文档 | 内容 |
+|---|---|
+| `docs/RFC_neural_arch_design.md` | 任务规则 / 硬件约束 / 监督信号 / 部署目标（中性 RFC） |
+| `docs/FINAL_ARCH_DESIGN.md` | SAGE-PR 完整架构、数学论证、训练范式、部署细节 |
+| `专家分析/2.md` | D₄ 群论 / 信息瓶颈 / Rademacher 边界论证 |
+| `专家分析/5.md` | 工程化路线 / 风险表 / 项目管理细节 |
+| `专家分析/6.md` | 神经-符号融合哲学 / 候选集合等变 / belief matrix |
+
+---
+
+## 附录 B：实施时间线（5 周建议）
+
+| 周 | 任务 |
+|---|---|
+| W1 (5d) | P1 全部 + P2.1-P2.2 |
+| W2 (5d) | P2.3 + P3.1-P3.4 |
+| W3 (7d) | P3.5-P3.6 + P4 全部 + P5.1 |
+| W4 (5d) | P5.2-P5.3 + P6 全部 |
+| W5 (5d) | P7 全部 + 实车 HIL |
+
+如时间允许，预留 1 周给 §7 故障排查表迭代。
+
+---
+
+*整合人：ralph-loop · 2026-05*
