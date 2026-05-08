@@ -364,6 +364,7 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | Rollout search beam=6 lookahead=25 | p4=48 p5=70 p6=66, 150-320ms (plateau) |
 | 2026-05-08 | Rollout search beam=8 lookahead=30 (验证) | p4=48% (与 b=6 l=25 相同, **phase 4 硬上限 48%** 已确认) |
 | 2026-05-08 | Ensemble 3 ckpts (无 search) | p1=100 p2=98 p3=80 p4=33 p5=43 p6=50 (略差于单 dl3_r1) |
+| 2026-05-08 | Rollout search beam=4 lookahead=50 (verify cap) | p5=70 (=) p6=68 (+2pp). 极深 lookahead 也无法突破 phase 5/6 上限. |
 | — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
