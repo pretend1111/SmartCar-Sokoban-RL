@@ -17,16 +17,15 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P5 — DAgger 多轮 (best dl2_r2_train ckpt)
-当前任务：继续 P5 (5-10+ 轮 DAgger), 或考虑 P7.4 神经引导 beam search 推理
-最新评估 (dl2_r2_train, top-k=4, 200 maps verified seed):
-  phase 1=100% ✓, 2=98.5% ✓, 3=75%, 4=36%, 5=48.5%, 6=53%
-目标差距: p3 -20pp, p4 -59pp, p5 -46.5pp, p6 -37pp 至 90/95%.
-DAgger 收益: phase 5 +13pp (35→48), phase 6 +4pp (49→53), phase 4 持平 ±1pp.
-分析: 进步在放慢 (round 1→2→3 几乎无变化). 还需:
-  - 大规模 DAgger (500+ maps × 5+ rounds, ~5 小时)
-  - 或神经引导 beam search (lookahead 真模拟, 而非 top-k 反循环)
-  - 或重新设计 candidate features 让 phase 4 也吃 DAgger 收益.
+当前阶段：P5 全部跑完, 已收敛 (4 个 DAgger 配置均 plateau)
+当前任务：P3.3 Soft Q label (强化 value head 让 beam search 真受益)
+最新评估 (跨 ckpt 横向对比, 200 maps × top-k=4 × verified seed):
+  best dl3_r1: p1=100 ✓ p2=99 ✓ p3=76.5 p4=36.5 p5=52 p6=51.5
+  best dl4_r2: p1=100 ✓ p2=99 ✓ p3=77 p4=35.5 p5=49.5 p6=52
+目标差距: p3 -18pp, p4 -58pp, p5 -43pp, p6 -38pp 至 90/95%.
+本 Ralph loop 已尝试: 4 BC 变体 + 4 DAgger 配置 + beam search depth=2.
+所有方案均收敛在 phase 4-6 ~30-55%. **BC + DAgger plateau 已达, 必须新方法**.
+路线: P3.3 Soft Q → 强化 V → 真 beam search 受益. 需重写 build_dataset_v3 加 Q* 估计 + 重训 + 重 eval. 估计 5-8 小时.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -354,7 +353,10 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | P4 bc_v3 (macro labels 60ep) | val_acc 83.6% (差), eval: p4=29, p5=28, p6=41 - macro alone hurts |
 | 2026-05-08 | P4 bc_v5 (bc_v2 + DAgger r1 808 samples) | val_acc 92.3%; eval top-k=4: p1=100, p2=96, p3=83, p4=33, p5=26, p6=46 |
 | 2026-05-08 | P5 DAgger loop dl2 (3 轮 fine-tune) | dl2_r2 top-k=4 (200 maps): p1=100 p2=98.5 p3=75 p4=36 p5=48.5 p6=53 |
-| — | P5 DAgger 5+ rounds + 500+ maps | — (本 Ralph loop 时间不足 3-4 小时迭代) |
+| 2026-05-08 | P5 DAgger dl3 (3 轮 200 maps each) | dl3_r1 (200 maps): p1=100 p2=99 p3=76.5 p4=36.5 **p5=52** p6=51.5 |
+| 2026-05-08 | P5 DAgger dl4 (2 轮 400 maps each, 13K samples) | dl4_r2 (200 maps): p1=100 p2=99 **p3=77** p4=35.5 p5=49.5 p6=52 |
+| 2026-05-08 | P7.4 神经引导 beam search 实现 | beam=5 D=2 phase 4-6 (30 maps): 30/50/53, 12-16ms, 跟 top-k=4 持平. value head 训练弱. |
+| — | P3.3 Soft Q label + 强化 value | TODO (修复 beam 表现的关键) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
 ---
