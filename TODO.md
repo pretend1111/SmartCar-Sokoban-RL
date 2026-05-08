@@ -17,12 +17,16 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P5 — DAgger 多轮迭代 (BC 已收敛到上限)
-当前任务：P5 大规模 DAgger (200+ maps × 多轮, 每轮训 + eval)
-最新评估 (bc_v5, top-k=4, 100 maps × seed 0):
-  phase 1=100%, 2=96%, 3=83%, 4=33%, 5=26%, 6=46%
-分析: BC 已经收敛到 92.8% per-step val_acc. 再训不动. 必须 DAgger 多轮.
-预期: 每轮 +3-5pp on phase 4-6. 需 5-10 轮才能达到 90% phase 6.
+当前阶段：P5 — DAgger 多轮 (best dl2_r2_train ckpt)
+当前任务：继续 P5 (5-10+ 轮 DAgger), 或考虑 P7.4 神经引导 beam search 推理
+最新评估 (dl2_r2_train, top-k=4, 200 maps verified seed):
+  phase 1=100% ✓, 2=98.5% ✓, 3=75%, 4=36%, 5=48.5%, 6=53%
+目标差距: p3 -20pp, p4 -59pp, p5 -46.5pp, p6 -37pp 至 90/95%.
+DAgger 收益: phase 5 +13pp (35→48), phase 6 +4pp (49→53), phase 4 持平 ±1pp.
+分析: 进步在放慢 (round 1→2→3 几乎无变化). 还需:
+  - 大规模 DAgger (500+ maps × 5+ rounds, ~5 小时)
+  - 或神经引导 beam search (lookahead 真模拟, 而非 top-k 反循环)
+  - 或重新设计 candidate features 让 phase 4 也吃 DAgger 收益.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -349,8 +353,9 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | P4 Stage A bc_v2 (扩 v3 数据 60ep) | val_acc 93.3%, eval: p1=100, p2=95, p3=76, p4=33, p5=33, p6=46 |
 | 2026-05-08 | P4 bc_v3 (macro labels 60ep) | val_acc 83.6% (差), eval: p4=29, p5=28, p6=41 - macro alone hurts |
 | 2026-05-08 | P4 bc_v5 (bc_v2 + DAgger r1 808 samples) | val_acc 92.3%; eval top-k=4: p1=100, p2=96, p3=83, p4=33, p5=26, p6=46 |
-| — | P5 DAgger 多轮迭代 | — |
-| — | P6 QAT 完成 | — |
+| 2026-05-08 | P5 DAgger loop dl2 (3 轮 fine-tune) | dl2_r2 top-k=4 (200 maps): p1=100 p2=98.5 p3=75 p4=36 p5=48.5 p6=53 |
+| — | P5 DAgger 5+ rounds + 500+ maps | — (本 Ralph loop 时间不足 3-4 小时迭代) |
+| — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
 ---
 
