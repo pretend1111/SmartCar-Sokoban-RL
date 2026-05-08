@@ -17,15 +17,15 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P5 全部跑完, 已收敛 (4 个 DAgger 配置均 plateau)
-当前任务：P3.3 Soft Q label (强化 value head 让 beam search 真受益)
-最新评估 (跨 ckpt 横向对比, 200 maps × top-k=4 × verified seed):
-  best dl3_r1: p1=100 ✓ p2=99 ✓ p3=76.5 p4=36.5 p5=52 p6=51.5
-  best dl4_r2: p1=100 ✓ p2=99 ✓ p3=77 p4=35.5 p5=49.5 p6=52
-目标差距: p3 -18pp, p4 -58pp, p5 -43pp, p6 -38pp 至 90/95%.
-本 Ralph loop 已尝试: 4 BC 变体 + 4 DAgger 配置 + beam search depth=2.
-所有方案均收敛在 phase 4-6 ~30-55%. **BC + DAgger plateau 已达, 必须新方法**.
-路线: P3.3 Soft Q → 强化 V → 真 beam search 受益. 需重写 build_dataset_v3 加 Q* 估计 + 重训 + 重 eval. 估计 5-8 小时.
+当前阶段：P7.4 rollout search 已突破, 调参中
+当前任务：rollout search 调参 (寻找最佳 beam × lookahead 组合)
+最新评估 (dl3_r1 + rollout search beam=4 lookahead=12, 100 maps × verified seed):
+  phase 1=100% ✓, 2=99% ✓, **3=95% ✓** (新), 4=45%, 5=62%, 6=64%
+目标差距: p4 -50pp, p5 -33pp, p6 -26pp 至 95/90%. (大幅缩小)
+重大突破: **rollout search 替代 value-head beam, 不依赖 value 训练**.
+关键: 对每候选 lookahead N 步 greedy → 进度评分 → 选最佳.
+代价: 推理 130-180ms (在 OpenART 50ms 预算外, 但 win-rate 表达正确).
+继续探索: 更深 lookahead (20+), 更宽 beam, 或合并 rollout + 多次开始策略.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -356,7 +356,8 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | P5 DAgger dl3 (3 轮 200 maps each) | dl3_r1 (200 maps): p1=100 p2=99 p3=76.5 p4=36.5 **p5=52** p6=51.5 |
 | 2026-05-08 | P5 DAgger dl4 (2 轮 400 maps each, 13K samples) | dl4_r2 (200 maps): p1=100 p2=99 **p3=77** p4=35.5 p5=49.5 p6=52 |
 | 2026-05-08 | P7.4 神经引导 beam search 实现 | beam=5 D=2 phase 4-6 (30 maps): 30/50/53, 12-16ms, 跟 top-k=4 持平. value head 训练弱. |
-| — | P3.3 Soft Q label + 强化 value | TODO (修复 beam 表现的关键) |
+| 2026-05-08 | **Rollout search inference (替代)** | dl3_r1 beam=4 lookahead=12 (100 maps): p1=100 p2=99 **p3=95 ✓** p4=45 p5=62 p6=64. 推理 130-180ms. |
+| — | P3.3 Soft Q label + 强化 value | TODO (短期不做; rollout search 更直接, 不依赖 value head) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
 ---
