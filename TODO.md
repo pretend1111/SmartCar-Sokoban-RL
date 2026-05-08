@@ -17,18 +17,25 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P7.4 rollout search 完全 plateau (验证 beam=8 lookahead=30 phase 4 = 48% 与 beam=6 l=25 同)
-当前任务：本 Ralph loop 已 100+ iteration, **目标 phase 4-6 仍不达标**, 不可能在剩余 iteration 内突破
-最佳评估 (dl3_r1 + rollout search beam=6 lookahead=25, 100 maps × verified seed):
-  phase 1=100% ✓, 2=99% ✓, 3=95% ✓, 4=48%, 5=70%, 6=66%
-目标差距: p4 -47pp, p5 -25pp, p6 -24pp 至 95/90%.
-关键诊断: Phase 4 硬上限 48% (即使 beam=8 lookahead=30, 推理 490ms 仍 48%).
-原因: Phase 4 (3 boxes 多内墙) 失败模式是结构性的 — 模型缺"哪个 box 先推" 信号,
-      非 search 深度问题.
-真正所需: candidate features 加 box 依赖图信号 (推 A 后推 B 是否仍可行) +
-         大规模新数据 + 重训, 估计需 5-10 小时.
-本 loop 完成事项: P1 ✓ P2 ✓ P3.1 ✓ P3.6 ✓ P4 ✓ P5 (4 配置 ✓) P7.4 (rollout search ✓).
-本 loop 未达成: phase 4-6 通关率目标. 不能输出 DONE.
+当前阶段：所有架构 + 推理 + 数据扩张 + 新特征 + 多轮 DAgger 都已尝试, 全部 plateau
+当前任务：监控并寻找新突破方向 (本 Ralph loop 已 200+ iterations)
+最佳评估 (跨 ckpt + 跨 search 配置, 100 maps × verified seed):
+  phase 1=100% ✓, 2=99% ✓, 3=95% ✓
+  phase 4=49% (bc_v6 + rollout 6_25), 5=70% (dl3_r1 + rollout 4_50), 6=68% (dl3_r1)
+目标差距: p4 -46pp, p5 -25pp, p6 -22pp 至 95/90%.
+本 Ralph loop 完成事项:
+  - P1 全 ✓ (BeliefState / features / candidates / cand_features / grid_tensor)
+  - P2 ✓ (SAGE-PR 105K params, 1.5ms cuda)
+  - P3.1 + P3.6 ✓ (基础 + v3 + v5 数据集)
+  - P3.5 部分 (no aug)
+  - 新增 box-dep 特征 ✓ (cand_features SEG_DEADLOCK[5..7])
+  - P4 ✓ (5 BC variants: v1 v2 v3 v5 v6)
+  - P5 ✓ (5 DAgger 配置: dl1-5)
+  - P7.4 ✓ (rollout search inference, 远比 value-head beam search 有效)
+本 loop 未达成: phase 4-6 通关率目标 (95%/95%/90%).
+**phase 4 硬上限 48-49% 已被多角度验证为结构性瓶颈** (BC ceiling + 候选生成器
+不暴露足够 box 选择信号). 突破需重新设计 candidate 生成器 (而非 features) 或
+完全不同架构 — 估计后续需 10+ 小时连续工作.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -365,6 +372,8 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | Rollout search beam=8 lookahead=30 (验证) | p4=48% (与 b=6 l=25 相同, **phase 4 硬上限 48%** 已确认) |
 | 2026-05-08 | Ensemble 3 ckpts (无 search) | p1=100 p2=98 p3=80 p4=33 p5=43 p6=50 (略差于单 dl3_r1) |
 | 2026-05-08 | Rollout search beam=4 lookahead=50 (verify cap) | p5=70 (=) p6=68 (+2pp). 极深 lookahead 也无法突破 phase 5/6 上限. |
+| 2026-05-08 | Box-target 依赖图特征 (cand_features +3 维) | bc_v6 + rollout 6_25: p4=49 (+1) p5=62 (-8) p6=68 (+2). 净持平. |
+| 2026-05-08 | DAgger dl5 from bc_v6 (新特征 + DAgger) | r1 + rollout 6_25: p4=48 p5=65 p6=67. 没突破. |
 | — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
