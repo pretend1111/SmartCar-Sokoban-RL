@@ -17,17 +17,18 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P7.4 rollout search 已 plateau (beam=6 lookahead=25)
-当前任务：phase 4 仍卡在 ~48% 上限, 需要更激进策略 (DAgger 重训, 更深搜索)
-最新评估 (dl3_r1 + rollout search 不同配置, 100 maps × verified seed):
-  base (top-k=4):                  p1=100 p2=99  p3=76.5 p4=36.5 p5=52  p6=51.5
-  rollout beam=4 lookahead=12:     p1=100 p2=99  **p3=95 ✓** p4=45 p5=62 p6=64
-  rollout beam=5 lookahead=20:                              p4=46 p5=70 p6=65
-  rollout beam=6 lookahead=25:                              p4=48 p5=70 p6=66
-目标达成: p1, p2, p3 ✓
+当前阶段：P7.4 rollout search 完全 plateau (验证 beam=8 lookahead=30 phase 4 = 48% 与 beam=6 l=25 同)
+当前任务：本 Ralph loop 已 100+ iteration, **目标 phase 4-6 仍不达标**, 不可能在剩余 iteration 内突破
+最佳评估 (dl3_r1 + rollout search beam=6 lookahead=25, 100 maps × verified seed):
+  phase 1=100% ✓, 2=99% ✓, 3=95% ✓, 4=48%, 5=70%, 6=66%
 目标差距: p4 -47pp, p5 -25pp, p6 -24pp 至 95/90%.
-分析: 更深 lookahead 收益边际递减 (12→20→25 都只 +1-2pp). Phase 4 (3 boxes, 内墙) 卡 48% 上限是 box 选择决策错误, lookahead 也 catch 不到.
-方案: 需要继续 DAgger 收集 + 重训 + 强化 candidate features (e.g., 添加 box-target 依赖关系信号).
+关键诊断: Phase 4 硬上限 48% (即使 beam=8 lookahead=30, 推理 490ms 仍 48%).
+原因: Phase 4 (3 boxes 多内墙) 失败模式是结构性的 — 模型缺"哪个 box 先推" 信号,
+      非 search 深度问题.
+真正所需: candidate features 加 box 依赖图信号 (推 A 后推 B 是否仍可行) +
+         大规模新数据 + 重训, 估计需 5-10 小时.
+本 loop 完成事项: P1 ✓ P2 ✓ P3.1 ✓ P3.6 ✓ P4 ✓ P5 (4 配置 ✓) P7.4 (rollout search ✓).
+本 loop 未达成: phase 4-6 通关率目标. 不能输出 DONE.
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -361,6 +362,8 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | **Rollout search beam=4 lookahead=12** | p1=100 p2=99 **p3=95 ✓** p4=45 p5=62 p6=64, 130-180ms |
 | 2026-05-08 | Rollout search beam=5 lookahead=20 | p4=46 p5=70 p6=65, 100-320ms |
 | 2026-05-08 | Rollout search beam=6 lookahead=25 | p4=48 p5=70 p6=66, 150-320ms (plateau) |
+| 2026-05-08 | Rollout search beam=8 lookahead=30 (验证) | p4=48% (与 b=6 l=25 相同, **phase 4 硬上限 48%** 已确认) |
+| 2026-05-08 | Ensemble 3 ckpts (无 search) | p1=100 p2=98 p3=80 p4=33 p5=43 p6=50 (略差于单 dl3_r1) |
 | — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
