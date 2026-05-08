@@ -367,12 +367,12 @@ def parse_phase456_seeds(manifest_path: str) -> Dict[str, List[int]]:
 
 
 def list_phase_maps(phase: int, n_max: Optional[int] = None) -> List[str]:
-    """枚举 assets/maps/phase{N}/*.txt."""
+    """枚举 assets/maps/phase{N}/*.txt. 返回 forward-slash paths (跨 OS 一致)."""
     folder = os.path.join(ROOT, f"assets/maps/phase{phase}")
     if not os.path.isdir(folder):
         return []
     files = sorted([
-        os.path.join(f"assets/maps/phase{phase}", fn)
+        f"assets/maps/phase{phase}/{fn}"   # 强制 forward-slash, 与 manifest 一致
         for fn in os.listdir(folder)
         if fn.endswith(".txt") and fn.startswith(f"phase{phase}_")
     ])

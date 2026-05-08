@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import io
 import json
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -58,6 +59,14 @@ def solver_only_episode(map_path: str, seed: int,
     return eng.get_state().won
 
 
+def _worker(args):
+    map_path, seed, time_limit, strategy = args
+    try:
+        return solver_only_episode(map_path, seed, time_limit=time_limit, strategy=strategy)
+    except Exception:
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phases", type=int, nargs="+", default=[1, 2, 3, 4, 5, 6])
@@ -66,6 +75,7 @@ def main():
     parser.add_argument("--use-verified-seeds", action="store_true")
     parser.add_argument("--time-limit", type=float, default=30.0)
     parser.add_argument("--strategy", default="best_first", choices=["auto", "best_first", "ida"])
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
@@ -81,18 +91,20 @@ def main():
     results = []
     for ph in args.phases:
         maps = list_phase_maps(ph)[:args.max_maps]
-        n_total = 0
-        n_won = 0
-        t0 = time.perf_counter()
+        tasks = []
         for map_path in maps:
             ms = (verified_map.get(map_path, [0])[:max(1, len(seeds))]
                   if verified_map else seeds)
             for seed in ms:
-                won = solver_only_episode(map_path, seed,
-                                           time_limit=args.time_limit,
-                                           strategy=args.strategy)
-                n_total += 1
-                if won: n_won += 1
+                tasks.append((map_path, seed, args.time_limit, args.strategy))
+        n_total = len(tasks)
+        t0 = time.perf_counter()
+        if args.workers > 1:
+            with mp.Pool(args.workers) as pool:
+                wins = list(pool.imap_unordered(_worker, tasks, chunksize=1))
+        else:
+            wins = [_worker(t) for t in tasks]
+        n_won = sum(1 for w in wins if w)
         elapsed = time.perf_counter() - t0
         r = {
             "phase": ph,
