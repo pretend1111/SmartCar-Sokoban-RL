@@ -292,11 +292,12 @@ def collect_episode(map_path: str, phase: int, seed: int,
 # ── 多图 worker ──────────────────────────────────────────
 
 def _worker_collect(args) -> Dict[str, Any]:
-    map_path, phase, seed, strategy, max_cost, time_limit = args
+    map_path, phase, seed, strategy, max_cost, time_limit, use_macro = args
     try:
         samples, status = collect_episode(
             map_path=map_path, phase=phase, seed=seed,
             strategy=strategy, max_cost=max_cost, time_limit=time_limit,
+            use_macro=use_macro,
         )
     except Exception as e:
         return {"map": map_path, "seed": seed, "n": 0, "status": f"error: {e}", "samples": []}
@@ -396,6 +397,8 @@ def main():
                         help="按 phase456_seed_manifest 选 seed")
     parser.add_argument("--max-seeds-per-map", type=int, default=None,
                         help="对 verified maps 的最大 seed 数 (默认与 --seeds 数相同)")
+    parser.add_argument("--no-macro", action="store_true",
+                        help="只用 1-step labels (默认: macro labels 1-3 步合并)")
     args = parser.parse_args()
 
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
@@ -432,12 +435,14 @@ def main():
             ms_use = ms[:n_per]
             for seed in ms_use:
                 tasks.append((map_path, args.phase, seed, args.strategy,
-                              args.max_cost, args.time_limit))
+                              args.max_cost, args.time_limit,
+                              not args.no_macro))
     else:
         for map_path in maps:
             for seed in seeds:
                 tasks.append((map_path, args.phase, seed, args.strategy,
-                              args.max_cost, args.time_limit))
+                              args.max_cost, args.time_limit,
+                              not args.no_macro))
 
     print(f"  total tasks: {len(tasks)}")
 

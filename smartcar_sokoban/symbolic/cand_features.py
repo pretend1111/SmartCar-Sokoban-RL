@@ -230,7 +230,7 @@ def encode_candidate(cand: Candidate, idx: int,
                 if (end_col, end_row) == (t.col, t.row):
                     v[off + 4] = 1.0  # 完成 pairing
 
-    # ── [82:96] 死锁 / 合法性 (14) ────────────────────────
+    # ── [82:96] 死锁 / 合法性 + box 依赖 (14) ────────────────────────
     off = SEG_DEADLOCK[0]
     if cand.type == "push_box" and cand.box_idx is not None:
         b = bs.boxes[cand.box_idx]
@@ -245,6 +245,37 @@ def encode_candidate(cand: Candidate, idx: int,
         push_pos_row = b.row - dr
         if 0 <= push_pos_row < GRID_ROWS and 0 <= push_pos_col < GRID_COLS:
             v[off + 1] = 0.0 if bs.M[push_pos_row, push_pos_col] else 1.0
+
+        # ── 依赖图信号 (新, 打破 phase 4 多 box 决策瓶颈) ───────────
+        # 检查推此 box 后, 其他 box 是否仍可达 target.
+        # 用 push_dist_field[j] 来粗略判断 (end_col, end_row) 是否在其他 box 的关键路径上.
+        n_box = len(bs.boxes)
+        if n_box > 1 and 0 <= end_row < GRID_ROWS and 0 <= end_col < GRID_COLS:
+            blocked_count = 0
+            block_cells_critical = 0
+            for j in range(n_box):
+                if j == cand.box_idx or j >= len(feat.push_dist_field):
+                    continue
+                field_j = feat.push_dist_field[j]
+                # 当前 box j 在自己 field 里的距离
+                d_now = field_j[bs.boxes[j].row, bs.boxes[j].col]
+                if d_now == INF:
+                    continue
+                # (end_col, end_row) 是否在 box j 的可达推送区里?
+                d_endcell = field_j[end_row, end_col]
+                if d_endcell != INF and d_endcell < d_now:
+                    # 这个 cell 是 box j 推送链上某个 "更近 target" 的位置
+                    # 占用这里 = 可能打断 box j 的路径
+                    block_cells_critical += 1
+                # 如果 (end_col, end_row) 在 box j 的 push field 里距离比较小 →
+                # box j 也许会路过这里, 推此 box 占了路.
+                if d_endcell != INF and d_endcell <= d_now / 2:
+                    blocked_count += 1
+            # 归一化
+            v[off + 5] = blocked_count / max(1, n_box - 1)
+            v[off + 6] = block_cells_critical / max(1, n_box - 1)
+            v[off + 7] = 1.0 if blocked_count > 0 else 0.0
+
     # 合法性自身 (即使非法也保留特征, 让网络看见 mask 之外的细节)
     v[off + 13] = 1.0 if cand.legal else 0.0
 
