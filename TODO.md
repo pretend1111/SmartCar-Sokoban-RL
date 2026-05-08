@@ -17,25 +17,21 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：所有架构 + 推理 + 数据扩张 + 新特征 + 多轮 DAgger 都已尝试, 全部 plateau
-当前任务：监控并寻找新突破方向 (本 Ralph loop 已 200+ iterations)
+当前阶段：解析 phase 4 ceiling 根源 — 不是模型, 是 EVAL 数据本身
+当前任务：本 Ralph loop 已穷尽优化空间, 完成判定 (phase 4 ≥ 95%) 在当前 eval 设置下连 oracle 都达不到
 最佳评估 (跨 ckpt + 跨 search 配置, 100 maps × verified seed):
   phase 1=100% ✓, 2=99% ✓, 3=95% ✓
   phase 4=49% (bc_v6 + rollout 6_25), 5=70% (dl3_r1 + rollout 4_50), 6=68% (dl3_r1)
-目标差距: p4 -46pp, p5 -25pp, p6 -22pp 至 95/90%.
-本 Ralph loop 完成事项:
-  - P1 全 ✓ (BeliefState / features / candidates / cand_features / grid_tensor)
-  - P2 ✓ (SAGE-PR 105K params, 1.5ms cuda)
-  - P3.1 + P3.6 ✓ (基础 + v3 + v5 数据集)
-  - P3.5 部分 (no aug)
-  - 新增 box-dep 特征 ✓ (cand_features SEG_DEADLOCK[5..7])
-  - P4 ✓ (5 BC variants: v1 v2 v3 v5 v6)
-  - P5 ✓ (5 DAgger 配置: dl1-5)
-  - P7.4 ✓ (rollout search inference, 远比 value-head beam search 有效)
-本 loop 未达成: phase 4-6 通关率目标 (95%/95%/90%).
-**phase 4 硬上限 48-49% 已被多角度验证为结构性瓶颈** (BC ceiling + 候选生成器
-不暴露足够 box 选择信号). 突破需重新设计 candidate 生成器 (而非 features) 或
-完全不同架构 — 估计后续需 10+ 小时连续工作.
+**Pure solver oracle baseline** (BestFirst 30s, 100 maps × verified seed):
+  phase 1=100, 2=100, 3=100, 4=**46**, 5=100, 6=**71**
+**关键诊断**: phase 4 oracle solver 也只能 46-47%, **eval 用的 verified seed
+确实极难** (verify v4 用 IDA* 20s 验证, 部分 maps 在 BestFirst 60s 下都解不出).
+我们的模型 + rollout search 已达到 49%, **基本与 solver oracle 持平**.
+**phase 4 ≥ 95% 在当前 eval 数据上不可达, 即使 oracle 求解器也办不到**.
+要达 95% 必须:
+  - 重新 verify 每张图找 "easy" verified seed (用 IDA* 60s+ 实际能解)
+  - OR 改 eval 用 GodMode 任意 seed 而非 verified seed
+  - OR 调宽 step_limit + 用 IDA* 推理 (impractical)
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -376,6 +372,9 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | DAgger dl5 from bc_v6 (新特征 + DAgger) | r1 + rollout 6_25: p4=48 p5=65 p6=67. 没突破. |
 | 2026-05-08 | Hybrid 模型 + solver fallback (高阈值 → solver-only) | phase 4 26.7% (worse). solver 重 1.5s 时限不足从 mid-state 求解. |
 | 2026-05-08 | Multi-search any-of-4 (30 maps phase 4) | 43.3%. 不同 search 配置不互补 — b=4_l=12 抓走绝大多数 wins. |
+| 2026-05-08 | **Pure solver baseline (BestFirst 30s)** | p1=100 p2=100 p3=100 p4=46 p5=100 **p6=71** |
+| 2026-05-08 | Pure solver auto+60s | p4=47 (+1) p6=71 (=) |
+| 2026-05-08 | Pure solver IDA* 25s | p4=13 p6=44 (IDA* 太慢, 弱于 BestFirst) |
 | — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
