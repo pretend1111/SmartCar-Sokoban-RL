@@ -97,12 +97,14 @@ def main():
             os.path.join(ROOT, "assets/maps/phase456_seed_manifest.json")
         )
 
-    # 4 个互补配置
+    # 6 个互补配置
     configs = [
         (4, 12),
         (5, 20),
         (6, 25),
         (4, 50),
+        (8, 30),
+        (3, 8),    # 浅 lookahead 也加上, 抓不同失败模式
     ]
 
     results = []
