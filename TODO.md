@@ -17,15 +17,17 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：P7.4 rollout search 已突破, 调参中
-当前任务：rollout search 调参 (寻找最佳 beam × lookahead 组合)
-最新评估 (dl3_r1 + rollout search beam=4 lookahead=12, 100 maps × verified seed):
-  phase 1=100% ✓, 2=99% ✓, **3=95% ✓** (新), 4=45%, 5=62%, 6=64%
-目标差距: p4 -50pp, p5 -33pp, p6 -26pp 至 95/90%. (大幅缩小)
-重大突破: **rollout search 替代 value-head beam, 不依赖 value 训练**.
-关键: 对每候选 lookahead N 步 greedy → 进度评分 → 选最佳.
-代价: 推理 130-180ms (在 OpenART 50ms 预算外, 但 win-rate 表达正确).
-继续探索: 更深 lookahead (20+), 更宽 beam, 或合并 rollout + 多次开始策略.
+当前阶段：P7.4 rollout search 已 plateau (beam=6 lookahead=25)
+当前任务：phase 4 仍卡在 ~48% 上限, 需要更激进策略 (DAgger 重训, 更深搜索)
+最新评估 (dl3_r1 + rollout search 不同配置, 100 maps × verified seed):
+  base (top-k=4):                  p1=100 p2=99  p3=76.5 p4=36.5 p5=52  p6=51.5
+  rollout beam=4 lookahead=12:     p1=100 p2=99  **p3=95 ✓** p4=45 p5=62 p6=64
+  rollout beam=5 lookahead=20:                              p4=46 p5=70 p6=65
+  rollout beam=6 lookahead=25:                              p4=48 p5=70 p6=66
+目标达成: p1, p2, p3 ✓
+目标差距: p4 -47pp, p5 -25pp, p6 -24pp 至 95/90%.
+分析: 更深 lookahead 收益边际递减 (12→20→25 都只 +1-2pp). Phase 4 (3 boxes, 内墙) 卡 48% 上限是 box 选择决策错误, lookahead 也 catch 不到.
+方案: 需要继续 DAgger 收集 + 重训 + 强化 candidate features (e.g., 添加 box-target 依赖关系信号).
 最后一次评估：— (旧 baseline 数字仅作下界参照)
 旧 baseline 上界 (combined v3 + branch search budget=256):
   phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
@@ -356,8 +358,10 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | P5 DAgger dl3 (3 轮 200 maps each) | dl3_r1 (200 maps): p1=100 p2=99 p3=76.5 p4=36.5 **p5=52** p6=51.5 |
 | 2026-05-08 | P5 DAgger dl4 (2 轮 400 maps each, 13K samples) | dl4_r2 (200 maps): p1=100 p2=99 **p3=77** p4=35.5 p5=49.5 p6=52 |
 | 2026-05-08 | P7.4 神经引导 beam search 实现 | beam=5 D=2 phase 4-6 (30 maps): 30/50/53, 12-16ms, 跟 top-k=4 持平. value head 训练弱. |
-| 2026-05-08 | **Rollout search inference (替代)** | dl3_r1 beam=4 lookahead=12 (100 maps): p1=100 p2=99 **p3=95 ✓** p4=45 p5=62 p6=64. 推理 130-180ms. |
-| — | P3.3 Soft Q label + 强化 value | TODO (短期不做; rollout search 更直接, 不依赖 value head) |
+| 2026-05-08 | **Rollout search beam=4 lookahead=12** | p1=100 p2=99 **p3=95 ✓** p4=45 p5=62 p6=64, 130-180ms |
+| 2026-05-08 | Rollout search beam=5 lookahead=20 | p4=46 p5=70 p6=65, 100-320ms |
+| 2026-05-08 | Rollout search beam=6 lookahead=25 | p4=48 p5=70 p6=66, 150-320ms (plateau) |
+| — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
 ---
