@@ -374,6 +374,8 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | Rollout search beam=4 lookahead=50 (verify cap) | p5=70 (=) p6=68 (+2pp). 极深 lookahead 也无法突破 phase 5/6 上限. |
 | 2026-05-08 | Box-target 依赖图特征 (cand_features +3 维) | bc_v6 + rollout 6_25: p4=49 (+1) p5=62 (-8) p6=68 (+2). 净持平. |
 | 2026-05-08 | DAgger dl5 from bc_v6 (新特征 + DAgger) | r1 + rollout 6_25: p4=48 p5=65 p6=67. 没突破. |
+| 2026-05-08 | Hybrid 模型 + solver fallback (高阈值 → solver-only) | phase 4 26.7% (worse). solver 重 1.5s 时限不足从 mid-state 求解. |
+| 2026-05-08 | Multi-search any-of-4 (30 maps phase 4) | 43.3%. 不同 search 配置不互补 — b=4_l=12 抓走绝大多数 wins. |
 | — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
