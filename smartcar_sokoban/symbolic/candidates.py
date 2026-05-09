@@ -132,6 +132,46 @@ def _bfs_from_player(bs: BeliefState, walls: np.ndarray,
     return dist
 
 
+def _box_at(bs: BeliefState, col: int, row: int,
+            exclude_idx: Optional[int] = None) -> Optional[int]:
+    """在 (col, row) 找箱子索引, 排除 exclude_idx."""
+    for j, b in enumerate(bs.boxes):
+        if j == exclude_idx:
+            continue
+        if b.col == col and b.row == row:
+            return j
+    return None
+
+
+def _can_chain_push(bs: BeliefState, walls: np.ndarray,
+                    box_idx: int, dc: int, dr: int,
+                    already_in_chain: Set[int]) -> bool:
+    """递归检查 box_idx 沿 (dc, dr) 是否可推 (不撞墙/炸弹, 后续链都能推).
+
+    已在链中的 box 排除. 撞另一箱 → 递归.
+    """
+    if box_idx in already_in_chain:
+        return False
+    b = bs.boxes[box_idx]
+    new_col = b.col + dc
+    new_row = b.row + dr
+    if not (0 <= new_row < GRID_ROWS and 0 <= new_col < GRID_COLS):
+        return False
+    if walls[new_row, new_col]:
+        return False
+    # 撞炸弹? 不允许
+    for bm in bs.bombs:
+        if (bm.col, bm.row) == (new_col, new_row):
+            return False
+    # 撞另一箱?
+    next_box = _box_at(bs, new_col, new_row, exclude_idx=box_idx)
+    if next_box is not None:
+        return _can_chain_push(bs, walls, next_box, dc, dr,
+                                already_in_chain | {box_idx})
+    # 落点空 — 这个箱本身合法
+    return True
+
+
 # ── 推箱候选 ──────────────────────────────────────────────
 
 def _gen_push_box_candidates(bs: BeliefState,
@@ -181,11 +221,21 @@ def _gen_push_box_candidates(bs: BeliefState,
                 out.append(cand)
                 continue
 
-            # 2) 推后箱位必须可推 (不是墙, 不是其他实体)
+            # 2) 推后箱位必须可推. 允许链式推 (撞另一箱 → 它也被同向推).
             if not _is_free(box_next_col, box_next_row, walls, obstacles):
-                cand.note = "box_next blocked"
-                out.append(cand)
-                continue
+                # 检查是不是另一个箱 → 链式推
+                hit_box_idx = _box_at(bs, box_next_col, box_next_row, exclude_idx=i)
+                if hit_box_idx is None:
+                    # 撞墙或炸弹, 不可推
+                    cand.note = "box_next blocked (wall/bomb)"
+                    out.append(cand)
+                    continue
+                # 链式: 模拟所有箱沿 dc, dr 推一步, 全部能落在 free cell 才算合法
+                if not _can_chain_push(bs, walls, hit_box_idx, dc, dr,
+                                        already_in_chain={i}):
+                    cand.note = "chain blocked"
+                    out.append(cand)
+                    continue
 
             # 3) 不能推入死锁 (除非该格是 target 且 ID 兼容)
             target_cells_compat = set()
