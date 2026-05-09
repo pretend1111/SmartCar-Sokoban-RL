@@ -213,6 +213,25 @@ def lerp_state(prev: GameState, cur: GameState, t: float) -> GameState:
 
 # ── 主可视化 ──────────────────────────────────────────────
 
+def list_phase_maps_local(map_path: str) -> List[str]:
+    """从 --map 路径推 phase 文件夹, 列出该文件夹所有地图 (sorted)."""
+    abs_path = os.path.join(ROOT, map_path) if not os.path.isabs(map_path) else map_path
+    folder = os.path.dirname(abs_path)
+    rel_folder = os.path.relpath(folder, ROOT).replace("\\", "/")
+    files = sorted([
+        f"{rel_folder}/{fn}"
+        for fn in os.listdir(folder)
+        if fn.endswith(".txt") and not fn.startswith("_")
+    ])
+    return files
+
+
+def lookup_seed(map_rel: str, vmap: dict, default: int = 0) -> int:
+    """从 manifest 取首个 verified seed, 没就用 default."""
+    rel = map_rel.replace("\\", "/")
+    return vmap.get(rel, [default])[0]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", default=".agent/sage_pr/runs/dl3_r1_train/best.pt")
@@ -233,36 +252,45 @@ def main():
     model.load_state_dict(ck["model_state_dict"])
     model.eval()
     print(f"loaded {args.ckpt}, val_acc={ck.get('val_acc', '?'):.3f}")
-    print(f"map: {args.map}")
 
-    # 读 verified seed
-    if args.seed is None:
-        vmap = parse_phase456_seeds(
-            os.path.join(ROOT, "assets/maps/phase456_seed_manifest.json")
-        )
-        rel = args.map.replace("\\", "/")
-        seeds = vmap.get(rel, [0])
-        seed = seeds[0]
-        print(f"seed={seed} (from manifest)")
-    else:
-        seed = args.seed
-        print(f"seed={seed} (manual)")
-
-    print(f"running hybrid_v2 inference (stuck={args.stuck}, solver_tl={args.solver_time_limit}s)...")
-    t0 = time.perf_counter()
-    action_log, won, info = hybrid_v2_record(
-        model, device, args.map, seed,
-        stuck_threshold=args.stuck,
-        solver_time_limit=args.solver_time_limit,
-        beam_width=args.beam, lookahead=args.lookahead,
+    vmap = parse_phase456_seeds(
+        os.path.join(ROOT, "assets/maps/phase456_seed_manifest.json")
     )
-    elapsed = time.perf_counter() - t0
-    n_low = len(action_log)
-    print(f"  inference: {elapsed:.1f}s, {info['n_macro_steps']} macro steps, "
-          f"{n_low} low-level actions, won={won}")
-    print(f"  model steps: {info['n_model_steps']}, solver calls: {info['n_solver_calls']}")
 
-    # 打印前几步动作日志
+    # 列出同 phase 所有地图, 并定位当前索引
+    all_maps = list_phase_maps_local(args.map)
+    rel = args.map.replace("\\", "/")
+    try:
+        cur_idx = all_maps.index(rel)
+    except ValueError:
+        cur_idx = 0
+        all_maps = [rel] + all_maps   # fallback: 把 --map 加到列表头
+    print(f"phase folder has {len(all_maps)} maps, current idx={cur_idx}")
+
+    # 推理一张图 → 返回 (action_log, won, info, seed_used)
+    def infer_map(map_rel: str):
+        seed = args.seed if args.seed is not None else lookup_seed(map_rel, vmap)
+        print(f"\n==== {map_rel} (seed={seed}) ====")
+        print(f"running hybrid_v2 inference (stuck={args.stuck}, "
+              f"solver_tl={args.solver_time_limit}s)...")
+        t0 = time.perf_counter()
+        action_log, won, info = hybrid_v2_record(
+            model, device, map_rel, seed,
+            stuck_threshold=args.stuck,
+            solver_time_limit=args.solver_time_limit,
+            beam_width=args.beam, lookahead=args.lookahead,
+        )
+        elapsed = time.perf_counter() - t0
+        n_low = len(action_log)
+        print(f"  inference: {elapsed:.1f}s, {info['n_macro_steps']} macro / "
+              f"{n_low} low-level, won={won}")
+        print(f"  model steps={info['n_model_steps']}, solver calls={info['n_solver_calls']}")
+        return action_log, won, info, seed
+
+    action_log, won, info, seed = infer_map(rel)
+    n_low = len(action_log)
+
+    # 打印前 30 trace
     print("\n动作 trace (前 30):")
     for i, (a, tag) in enumerate(action_log[:30]):
         print(f"  [{i:3d}] action={a:2d} {tag}")
@@ -281,11 +309,13 @@ def main():
     renderer.init()
     clock = pygame.time.Clock()
 
-    random.seed(seed)
-    rel_path = args.map
-    if not os.path.isabs(rel_path):
-        rel_path = rel_path
-    eng_play.reset(rel_path)
+    cur_map = rel
+    cur_seed = seed
+    cur_action_log = action_log
+    cur_info = info
+
+    random.seed(cur_seed)
+    eng_play.reset(cur_map)
 
     state = eng_play.get_state()
     prev_state = None
@@ -296,7 +326,34 @@ def main():
     step_delay = 0.1
     last_step_time = 0.0
 
-    print("\n[pygame] SPACE=暂停  R=重置  ←/→=调速  Tab=切渲染  ESC=退出")
+    def reload_map(new_idx: int):
+        """切换到 new_idx 对应的地图: 重跑推理 + 重置回放."""
+        nonlocal cur_idx, cur_map, cur_seed, cur_action_log, cur_info
+        nonlocal state, prev_state, act_idx, playing, animating, anim_progress
+        cur_idx = new_idx % len(all_maps)
+        cur_map = all_maps[cur_idx]
+        cur_action_log, _, cur_info, cur_seed = infer_map(cur_map)
+        random.seed(cur_seed)
+        eng_play.reset(cur_map)
+        state = eng_play.get_state()
+        prev_state = None
+        act_idx = 0
+        playing = True
+        animating = False
+        anim_progress = 0.0
+
+    def reset_current():
+        nonlocal state, prev_state, act_idx, animating, anim_progress, playing
+        random.seed(cur_seed)
+        eng_play.reset(cur_map)
+        state = eng_play.get_state()
+        prev_state = None
+        act_idx = 0
+        animating = False
+        anim_progress = 0.0
+        playing = True
+
+    print("\n[pygame] SPACE=暂停 R=重置 ←/→=切地图 +/-=调速 Tab=切渲染 ESC=退出")
     running = True
     while running:
         dt = clock.tick(cfg.fps) / 1000.0
@@ -311,26 +368,25 @@ def main():
                 elif event.key == pygame.K_SPACE:
                     playing = not playing
                 elif event.key == pygame.K_r:
-                    random.seed(seed)
-                    eng_play.reset(rel_path)
-                    state = eng_play.get_state()
-                    prev_state = None
-                    act_idx = 0
-                    animating = False
-                    anim_progress = 0.0
+                    reset_current()
                 elif event.key == pygame.K_LEFT:
-                    step_delay = min(1.0, step_delay + 0.03)
+                    reload_map(cur_idx - 1)
                 elif event.key == pygame.K_RIGHT:
+                    reload_map(cur_idx + 1)
+                elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
                     step_delay = max(0.02, step_delay - 0.03)
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    step_delay = min(1.0, step_delay + 0.03)
                 elif event.key == pygame.K_TAB:
                     m = "simple" if cfg.render_mode == "full" else "full"
                     renderer.switch_mode(m)
 
+        n_low = len(cur_action_log)
         now = time.perf_counter()
-        if playing and not animating and act_idx < len(action_log):
+        if playing and not animating and act_idx < n_low:
             if now - last_step_time >= step_delay:
                 prev_state = copy.deepcopy(state)
-                a, _ = action_log[act_idx]
+                a, _ = cur_action_log[act_idx]
                 state = eng_play.discrete_step(a)
                 act_idx += 1
                 animating = True
@@ -349,11 +405,12 @@ def main():
         renderer.render(display_state)
 
         # HUD
+        map_name = os.path.basename(cur_map)
         title_lines = [
-            f"map={os.path.basename(args.map)} seed={seed}",
-            f"step {act_idx}/{n_low} ({info['n_macro_steps']} macro)",
+            f"[{cur_idx+1}/{len(all_maps)}] {map_name}  seed={cur_seed}",
+            f"step {act_idx}/{n_low} ({cur_info['n_macro_steps']} macro)",
             f"{'WON ✓' if state.won else 'in progress' if act_idx < n_low else 'FAIL'}",
-            f"speed={1/step_delay:.1f}/s  R=reset",
+            f"speed={1/step_delay:.1f}/s  ←→ map  +/- speed  R reset",
         ]
         try:
             font = pygame.font.SysFont("consolas", 16)
