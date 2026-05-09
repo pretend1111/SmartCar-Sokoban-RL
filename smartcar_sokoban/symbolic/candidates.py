@@ -143,12 +143,22 @@ def _box_at(bs: BeliefState, col: int, row: int,
     return None
 
 
+def _bomb_at(bs: BeliefState, col: int, row: int,
+             exclude_idx: Optional[int] = None) -> Optional[int]:
+    for k, bm in enumerate(bs.bombs):
+        if k == exclude_idx:
+            continue
+        if bm.col == col and bm.row == row:
+            return k
+    return None
+
+
 def _can_chain_push(bs: BeliefState, walls: np.ndarray,
                     box_idx: int, dc: int, dr: int,
                     already_in_chain: Set[int]) -> bool:
-    """递归检查 box_idx 沿 (dc, dr) 是否可推 (不撞墙/炸弹, 后续链都能推).
+    """递归检查 box_idx 沿 (dc, dr) 是否可推. 撞另一箱 / 炸弹 → 递归.
 
-    已在链中的 box 排除. 撞另一箱 → 递归.
+    撞墙 (本箱要推到墙位) → 不可推 (箱不能炸).
     """
     if box_idx in already_in_chain:
         return False
@@ -159,16 +169,47 @@ def _can_chain_push(bs: BeliefState, walls: np.ndarray,
         return False
     if walls[new_row, new_col]:
         return False
-    # 撞炸弹? 不允许
-    for bm in bs.bombs:
-        if (bm.col, bm.row) == (new_col, new_row):
-            return False
-    # 撞另一箱?
+    next_bomb = _bomb_at(bs, new_col, new_row)
+    if next_bomb is not None:
+        # box → bomb → ... 链
+        return _can_chain_bomb_push(bs, walls, next_bomb, dc, dr,
+                                      bombs_in_chain=set(),
+                                      boxes_in_chain=already_in_chain | {box_idx})
     next_box = _box_at(bs, new_col, new_row, exclude_idx=box_idx)
     if next_box is not None:
         return _can_chain_push(bs, walls, next_box, dc, dr,
                                 already_in_chain | {box_idx})
-    # 落点空 — 这个箱本身合法
+    return True
+
+
+def _can_chain_bomb_push(bs: BeliefState, walls: np.ndarray,
+                          bomb_idx: int, dc: int, dr: int,
+                          bombs_in_chain: Set[int],
+                          boxes_in_chain: Set[int]) -> bool:
+    """递归检查 bomb_idx 沿 (dc, dr) 是否可推. 撞墙 → 引爆 OK; 撞另炸弹 → 递归;
+    撞箱 → 看箱能否再推.
+    """
+    if bomb_idx in bombs_in_chain:
+        return False
+    bm = bs.bombs[bomb_idx]
+    new_col = bm.col + dc
+    new_row = bm.row + dr
+    if not (0 <= new_row < GRID_ROWS and 0 <= new_col < GRID_COLS):
+        return False
+    if walls[new_row, new_col]:
+        # 撞墙引爆, 链终止
+        return True
+    next_bomb = _bomb_at(bs, new_col, new_row, exclude_idx=bomb_idx)
+    if next_bomb is not None:
+        return _can_chain_bomb_push(bs, walls, next_bomb, dc, dr,
+                                      bombs_in_chain | {bomb_idx},
+                                      boxes_in_chain)
+    next_box = _box_at(bs, new_col, new_row)
+    if next_box is not None:
+        if next_box in boxes_in_chain:
+            return False
+        return _can_chain_push(bs, walls, next_box, dc, dr,
+                                already_in_chain=boxes_in_chain | {next_box})
     return True
 
 
@@ -335,6 +376,29 @@ def _gen_push_bomb_candidates(bs: BeliefState,
                 continue
 
             if (bomb_next_col, bomb_next_row) in obstacles:
+                # 撞实体: 是箱链 / 炸弹链 → 递归看链能否成立
+                if is_diag:
+                    # 对角推炸弹仅支持入墙特例, 撞实体不行
+                    out.append(cand)
+                    continue
+                # 链头是 bomb 还是 box?
+                hit_bomb = _bomb_at(bs, bomb_next_col, bomb_next_row, exclude_idx=k)
+                hit_box = _box_at(bs, bomb_next_col, bomb_next_row)
+                if hit_bomb is not None:
+                    if _can_chain_bomb_push(bs, walls, hit_bomb, dc, dr,
+                                             bombs_in_chain={k}, boxes_in_chain=set()):
+                        cand.legal = True
+                        cand.note = "bomb chain"
+                        out.append(cand)
+                        continue
+                if hit_box is not None:
+                    # bomb 推 box: 把 box 当链头检查
+                    if _can_chain_push(bs, walls, hit_box, dc, dr,
+                                        already_in_chain=set()):
+                        cand.legal = True
+                        cand.note = "bomb→box chain"
+                        out.append(cand)
+                        continue
                 out.append(cand)
                 continue
 
@@ -446,6 +510,53 @@ def _gen_inspect_candidates(bs: BeliefState,
     for j, t in enumerate(bs.targets):
         if t.num_id is None:
             _enum_for_entity("target", j, t.col, t.row)
+
+    # 兜底: 若某未识别 entity 没有任何严格 8 邻 viewpoint, 加 "宽松" 候选 —
+    # 找最近可达 cell 任意方向, heading=0 占位 (实战这种 cell 旁边推一推就能产生空隙).
+    # 这种候选的 legal=True 但实际可能识别不了 entity, 算占位让老师有动作可选.
+    coverage: Set[Tuple[str, int]] = set()
+    for c in out:
+        coverage.add((c.inspect_target_type, c.inspect_target_idx))
+
+    def _enum_loose(etype: str, eidx: int, ec: int, er: int):
+        # 找距 entity ≤ 3 的可达 cell, 任意方向
+        for dr in range(-3, 4):
+            for dc in range(-3, 4):
+                nc, nr = ec + dc, er + dr
+                if not (0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS):
+                    continue
+                if walls[nr, nc] or (nc, nr) in obstacles:
+                    continue
+                if not feat.reachable_mask[nr, nc]:
+                    continue
+                # heading 朝 entity 大致方向 (取符号化 dc, dr)
+                hdc = -1 if dc > 0 else (1 if dc < 0 else 0)
+                hdr = -1 if dr > 0 else (1 if dr < 0 else 0)
+                if (hdc, hdr) == (0, 0):
+                    continue
+                heading = DIR_TO_HEADING.get((hdc, hdr), 0)
+                key = (nc, nr, etype, eidx)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                out.append(Candidate(
+                    type="inspect",
+                    viewpoint_col=nc,
+                    viewpoint_row=nr,
+                    inspect_heading=heading,
+                    inspect_target_type=etype,
+                    inspect_target_idx=eidx,
+                    legal=True,
+                    note="loose-fallback",
+                ))
+                return
+
+    for i, b in enumerate(bs.boxes):
+        if b.class_id is None and ("box", i) not in coverage:
+            _enum_loose("box", i, b.col, b.row)
+    for j, t in enumerate(bs.targets):
+        if t.num_id is None and ("target", j) not in coverage:
+            _enum_loose("target", j, t.col, t.row)
 
     return out[:MAX_INSPECT]
 

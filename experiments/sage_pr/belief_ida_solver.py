@@ -73,11 +73,11 @@ Move = Tuple[str, object, Tuple[int, int], int]
 
 
 def solve_for_sigma_pair(state, σ_pair: SigmaPair,
-                          time_limit: float = 30.0,
+                          time_limit: float = 60.0,
                           strategy: str = "auto") -> Optional[List[Move]]:
     """规范化标签: 把 box_i 当 class=i, target_{σp[i]} 当 num=i.
 
-    让 solver 计算 box_i → target_{σp[i]} 的最优 plan.
+    让 solver 计算 box_i → target_{σp[i]} 的最优 plan. 自带 BestFirst → IDA* fallback (auto).
     """
     n = len(state.boxes)
     if len(σ_pair) != n:
@@ -98,7 +98,11 @@ def solve_for_sigma_pair(state, σ_pair: SigmaPair,
     solver = MultiBoxSolver(state.grid, car, boxes_with_canon, targets_dict, bombs)
     with contextlib.redirect_stdout(io.StringIO()):
         try:
-            return solver.solve(max_cost=300, time_limit=time_limit, strategy=strategy)
+            sol = solver.solve(max_cost=300, time_limit=time_limit, strategy=strategy)
+            if sol is not None:
+                return sol
+            # IDA* / auto 失败 → 强制 BestFirst 兜底 (这个 σ_pair 可能就是难解的, 用 BF 1.5×OPT)
+            return solver.solve(max_cost=300, time_limit=time_limit, strategy="best_first")
         except Exception:
             return None
 
@@ -408,7 +412,38 @@ def belief_ida_solve(map_path: str, seed: int,
         inspect_cand = pick_best_inspect_candidate(bs, cands, sigma_pairs,
                                                      K_box, K_target)
         if inspect_cand is None:
-            return None, "no_inspect"
+            # 兜底: inspect 不可用 (entity 全被堵) → 跑 majority vote push 解开僵局.
+            # 取所有 σ_pair 第一动作出现频率最高的, 试推一下让物理状态变化.
+            from collections import Counter
+            first_moves = []
+            for σ in sigma_pairs:
+                if pointers[σ] < len(plans[σ]):
+                    first_moves.append(_normalize_move(plans[σ][pointers[σ]]))
+            if not first_moves:
+                return None, "no_inspect"
+            most_common, _ = Counter(first_moves).most_common(1)[0]
+            # 找对应 σ
+            picked_σ = None
+            for σ in sigma_pairs:
+                if (pointers[σ] < len(plans[σ])
+                        and _normalize_move(plans[σ][pointers[σ]]) == most_common):
+                    picked_σ = σ
+                    break
+            if picked_σ is None:
+                return None, "no_inspect"
+            move = plans[picked_σ][pointers[picked_σ]]
+            label = match_move_to_candidate_index(move, cands, bs)
+            if label is None:
+                return None, "majority_vote_match_fail"
+            samples_meta.append({
+                "bs": bs, "feat": feat, "cands": cands,
+                "label": label, "type": "push",
+            })
+            if not apply_move(eng, move):
+                return None, "majority_vote_apply_fail"
+            # 跳出 LCP 走野了, 强制下一轮重新 enum + IDA* (cache miss)
+            cache_key = None
+            continue
 
         label = -1
         for k, c in enumerate(cands):
