@@ -208,8 +208,10 @@ def _can_chain_bomb_push(bs: BeliefState, walls: np.ndarray,
     if next_box is not None:
         if next_box in boxes_in_chain:
             return False
+        # 不要预先把 next_box 加进 already_in_chain — _can_chain_push 内部第一行
+        # 会做 cycle check, 如果 next_box 已在 set 里它会 return False (误判 chain blocked).
         return _can_chain_push(bs, walls, next_box, dc, dr,
-                                already_in_chain=boxes_in_chain | {next_box})
+                                already_in_chain=boxes_in_chain)
     return True
 
 
@@ -262,19 +264,29 @@ def _gen_push_box_candidates(bs: BeliefState,
                 out.append(cand)
                 continue
 
-            # 2) 推后箱位必须可推. 允许链式推 (撞另一箱 → 它也被同向推).
+            # 2) 推后箱位必须可推. 允许链式推 (撞另一箱/炸弹 → 它也被同向推).
             if not _is_free(box_next_col, box_next_row, walls, obstacles):
-                # 检查是不是另一个箱 → 链式推
+                # 检查 box_next 是箱 / 炸弹 / 墙
                 hit_box_idx = _box_at(bs, box_next_col, box_next_row, exclude_idx=i)
-                if hit_box_idx is None:
-                    # 撞墙或炸弹, 不可推
-                    cand.note = "box_next blocked (wall/bomb)"
-                    out.append(cand)
-                    continue
-                # 链式: 模拟所有箱沿 dc, dr 推一步, 全部能落在 free cell 才算合法
-                if not _can_chain_push(bs, walls, hit_box_idx, dc, dr,
-                                        already_in_chain={i}):
-                    cand.note = "chain blocked"
+                hit_bomb_idx = _bomb_at(bs, box_next_col, box_next_row)
+                if hit_box_idx is not None:
+                    # 箱推箱链
+                    if not _can_chain_push(bs, walls, hit_box_idx, dc, dr,
+                                            already_in_chain={i}):
+                        cand.note = "chain blocked"
+                        out.append(cand)
+                        continue
+                elif hit_bomb_idx is not None:
+                    # 箱推炸弹链 (炸弹被推到墙 → 引爆 OK)
+                    if not _can_chain_bomb_push(bs, walls, hit_bomb_idx, dc, dr,
+                                                  bombs_in_chain=set(),
+                                                  boxes_in_chain={i}):
+                        cand.note = "bomb chain blocked"
+                        out.append(cand)
+                        continue
+                else:
+                    # 撞墙
+                    cand.note = "box_next blocked (wall)"
                     out.append(cand)
                     continue
 

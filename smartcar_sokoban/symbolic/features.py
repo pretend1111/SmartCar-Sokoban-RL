@@ -205,12 +205,75 @@ def compute_push_dir_field(push_dist_fields: List[np.ndarray]) -> np.ndarray:
 
 # ── 死锁检测 (静态) ────────────────────────────────────────
 
+def compute_destructible_walls(bs: BeliefState) -> Set[Tuple[int, int]]:
+    """估算可被炸弹炸毁的墙集合.
+
+    上限近似: 把每个炸弹通过 4-邻 BFS 能到达的所有格作为潜在引爆点.
+        对每个引爆点 (c, r), 它若被推入相邻墙格则在 (c, r) 处引爆, 3×3 范围内的墙都被清除.
+        所以可被炸毁的墙 = ⋃ {3×3 around (c, r) | (c, r) 是潜在引爆点 且 它有相邻墙}.
+
+    注: 这只是 admissible 上限 (会过度乐观), 但对 deadlock 检测来说更宽松 = 更安全
+        (避免假死锁误标 candidate 非法). 真正不可解的 deadlock 仍由 solver 自己排除.
+    """
+    walls = bs.M.astype(bool)
+    rows, cols = walls.shape
+    destructible: Set[Tuple[int, int]] = set()
+
+    if not bs.bombs:
+        return destructible
+
+    # 障碍 = 墙 + 箱 (其他炸弹也算, 但简化先不区分; 反正 BFS 会越过)
+    box_obstacles = {(b.col, b.row) for b in bs.boxes}
+    bomb_positions = {(bm.col, bm.row) for bm in bs.bombs}
+
+    for bomb in bs.bombs:
+        # BFS 从炸弹位置, 4-邻可达 (墙/箱阻挡, 其他炸弹也阻挡)
+        start = (bomb.col, bomb.row)
+        visited: Set[Tuple[int, int]] = {start}
+        q = deque([start])
+        other_bombs = bomb_positions - {start}
+        while q:
+            c, r = q.popleft()
+            for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nc, nr = c + dc, r + dr
+                if (nc, nr) in visited:
+                    continue
+                if not (0 <= nr < rows and 0 <= nc < cols):
+                    continue
+                if walls[nr, nc]:
+                    continue
+                if (nc, nr) in box_obstacles or (nc, nr) in other_bombs:
+                    continue
+                visited.add((nc, nr))
+                q.append((nc, nr))
+
+        # 对每个可达格 (c, r), 若它有相邻墙, 它就是潜在引爆点
+        for c, r in visited:
+            has_adj_wall = False
+            for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                wc, wr = c + dc, r + dr
+                if 0 <= wr < rows and 0 <= wc < cols and walls[wr, wc]:
+                    has_adj_wall = True
+                    break
+            if not has_adj_wall:
+                continue
+            # 3×3 周围所有墙格都可被炸毁
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    ec, er = c + dx, r + dy
+                    if 0 <= er < rows and 0 <= ec < cols and walls[er, ec]:
+                        destructible.add((ec, er))
+
+    return destructible
+
+
 def compute_deadlock_mask(bs: BeliefState) -> np.ndarray:
-    """静态死锁: 角落 + 边缘线.
+    """静态死锁: 角落 + 边缘线 (考虑炸弹炸墙).
 
     Corner deadlock: 格 (r, c) 是空格, 但 (r±1, c) 至少一个是墙 + (r, c±1) 至少
         一个是墙, 且 (r, c) 不是任何 target.
-    Edge-line deadlock (简化): 暂不实现 (代价高).
+
+    若导致 corner 的墙能被炸弹炸毁 (compute_destructible_walls), 则不算 deadlock.
 
     注: 这是箱子推到该格后无法推出的格. 对玩家无影响, 仅用作候选合法性 mask.
     """
@@ -219,6 +282,13 @@ def compute_deadlock_mask(bs: BeliefState) -> np.ndarray:
 
     # target 集合
     target_cells = {(t.col, t.row) for t in bs.targets}
+    destructible = compute_destructible_walls(bs)
+
+    def is_solid_wall(c: int, r: int) -> bool:
+        """是真墙 (不可被炸毁)."""
+        if not (0 <= r < GRID_ROWS and 0 <= c < GRID_COLS):
+            return True   # 越界 = 实墙
+        return walls[r, c] and (c, r) not in destructible
 
     for r in range(GRID_ROWS):
         for c in range(GRID_COLS):
@@ -227,11 +297,11 @@ def compute_deadlock_mask(bs: BeliefState) -> np.ndarray:
             if (c, r) in target_cells:
                 continue
 
-            # 检查 4 个 corner 配置
-            wall_n = r == 0 or walls[r - 1, c]
-            wall_s = r == GRID_ROWS - 1 or walls[r + 1, c]
-            wall_e = c == GRID_COLS - 1 or walls[r, c + 1]
-            wall_w = c == 0 or walls[r, c - 1]
+            # 检查 4 个 corner 配置 (用 effective wall: 不含可炸墙)
+            wall_n = is_solid_wall(c, r - 1)
+            wall_s = is_solid_wall(c, r + 1)
+            wall_e = is_solid_wall(c + 1, r)
+            wall_w = is_solid_wall(c - 1, r)
 
             corner_ne = wall_n and wall_e
             corner_nw = wall_n and wall_w
