@@ -118,7 +118,8 @@ def main():
     parser.add_argument('--idx', type=int, default=0, help='起始地图索引')
     parser.add_argument('--map', type=str, default=None, help='指定地图文件名')
     parser.add_argument('--seed', type=int, default=None, help='指定地图编号随机种子；默认优先读取 manifest')
-    parser.add_argument('--solver', choices=['auto', 'exact'], default='auto', help='回放使用的求解器')
+    parser.add_argument('--solver', choices=['auto', 'exact', 'interleaved'],
+                        default='auto', help='auto=AutoPlayer, exact=plan_exploration+IDA*, interleaved=探索/推交织 (推荐)')
     args = parser.parse_args()
 
     phase_dir = MAPS_ROOT / f"phase{args.phase}"
@@ -180,7 +181,11 @@ def main():
         # 求解
         random.seed(current_seed)
         engine.reset(rel)
-        if args.solver == 'exact':
+        if args.solver == 'interleaved':
+            from smartcar_sokoban.solver.interleaved_solver import plan_best
+            result = plan_best(engine, time_limit=60.0, verbose=True)
+            actions = result[0] if result is not None else []
+        elif args.solver == 'exact':
             result = solve_exact(engine)
             actions = result[0] if result is not None else []
         else:
