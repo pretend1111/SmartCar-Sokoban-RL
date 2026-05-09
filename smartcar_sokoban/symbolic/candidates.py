@@ -63,7 +63,9 @@ class Candidate:
     # 探索观察
     viewpoint_col: Optional[int] = None
     viewpoint_row: Optional[int] = None
-    inspect_heading: Optional[int] = None  # 0..7 朝向
+    inspect_heading: Optional[int] = None         # 0..7 朝向 (东/SE/南/SW/西/NW/北/NE)
+    inspect_target_type: Optional[str] = None     # "box" / "target" — JEPP 老师选 inspect 时指向的 entity 类型
+    inspect_target_idx: Optional[int] = None      # bs.boxes / bs.targets 里的索引
 
     # 调试用
     note: str = ""
@@ -303,39 +305,99 @@ def _gen_push_bomb_candidates(bs: BeliefState,
 
 def _gen_inspect_candidates(bs: BeliefState,
                             feat: DomainFeatures) -> List[Candidate]:
-    """挑 top-K info_gain > 0 的可达格作为视点."""
+    """对每个未识别 entity, 枚举其 8 邻 + LOS 通的 viewpoint, 朝向 entity.
+
+    匹配 engine 严格 FOV 规则: 必须距离 ≤ √2 + 朝向 ≤ ±22.5° + 视线无遮挡.
+    """
     if bs.fully_identified:
         return []
-    ig = feat.info_gain_heatmap
-    candidates: List[Tuple[float, int, int]] = []
-    for r in range(GRID_ROWS):
-        for c in range(GRID_COLS):
-            if ig[r, c] > 0 and feat.reachable_mask[r, c]:
-                candidates.append((float(ig[r, c]), c, r))
-    if not candidates:
-        return []
-    candidates.sort(reverse=True)
+
+    walls = bs.M.astype(bool)
+
+    obstacles: Set[Tuple[int, int]] = set()
+    for b in bs.boxes:
+        obstacles.add((b.col, b.row))
+    for bm in bs.bombs:
+        obstacles.add((bm.col, bm.row))
+
+    # 用于 has_line_of_sight 的 entity_positions (含 targets)
+    entity_pos: Set[Tuple[int, int]] = set(obstacles)
+    for t in bs.targets:
+        entity_pos.add((t.col, t.row))
+
+    DIRS_8 = (
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+    )
+    # heading 量化: dc, dr → 0..7 (东=0, SE=1, 南=2, ..., NE=7)
+    DIR_TO_HEADING = {
+        (1, 0): 0, (1, 1): 1, (0, 1): 2, (-1, 1): 3,
+        (-1, 0): 4, (-1, -1): 5, (0, -1): 6, (1, -1): 7,
+    }
+
     out: List[Candidate] = []
-    for score, c, r in candidates[:MAX_INSPECT]:
-        # heading: 选 4 邻接里 IG 最高的方向作为朝向
-        best_heading = 0
-        best_neighbor_score = -1.0
-        for k, (dc, dr) in enumerate(DIRS_4):
-            nc, nr = c + dc, r + dr
-            if 0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS:
-                # heading 8 朝向, 0=E,1=SE,...
-                heading_8 = {0: 0, 1: 4, 2: 2, 3: 6}[k]  # E,W,S,N → 0,4,2,6
-                if ig[nr, nc] > best_neighbor_score:
-                    best_neighbor_score = ig[nr, nc]
-                    best_heading = heading_8
-        out.append(Candidate(
-            type="inspect",
-            viewpoint_col=c,
-            viewpoint_row=r,
-            inspect_heading=best_heading,
-            legal=True,
-        ))
-    return out
+    seen_keys: Set[Tuple[int, int, str, int]] = set()
+
+    def _has_los(fc: int, fr: int, tc: int, tr: int) -> bool:
+        # 内联 has_line_of_sight 简化版 (只看墙 + 实体 (排除 entity 自身))
+        x0, y0 = fc + 0.5, fr + 0.5
+        x1, y1 = tc + 0.5, tr + 0.5
+        import math as _m
+        dx, dy = x1 - x0, y1 - y0
+        dist = _m.sqrt(dx * dx + dy * dy)
+        if dist < 0.1:
+            return True
+        steps = int(dist * 4) + 1
+        for i in range(1, steps):
+            t = i / steps
+            px = x0 + dx * t
+            py = y0 + dy * t
+            cc, rr = int(px), int(py)
+            if 0 <= rr < GRID_ROWS and 0 <= cc < GRID_COLS:
+                if walls[rr, cc]:
+                    return False
+                if (cc, rr) != (tc, tr) and (cc, rr) in entity_pos:
+                    return False
+        return True
+
+    def _enum_for_entity(etype: str, eidx: int, ec: int, er: int):
+        for dc, dr in DIRS_8:
+            nc, nr = ec + dc, er + dr
+            if not (0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS):
+                continue
+            if walls[nr, nc]:
+                continue
+            if (nc, nr) in obstacles:
+                continue
+            if not feat.reachable_mask[nr, nc]:
+                continue
+            if not _has_los(nc, nr, ec, er):
+                continue
+            # 朝向: 从 viewpoint 看 entity 的方向 (反 dc, dr)
+            head_dc, head_dr = -dc, -dr
+            heading = DIR_TO_HEADING.get((head_dc, head_dr), 0)
+            key = (nc, nr, etype, eidx)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            out.append(Candidate(
+                type="inspect",
+                viewpoint_col=nc,
+                viewpoint_row=nr,
+                inspect_heading=heading,
+                inspect_target_type=etype,
+                inspect_target_idx=eidx,
+                legal=True,
+            ))
+
+    for i, b in enumerate(bs.boxes):
+        if b.class_id is None:
+            _enum_for_entity("box", i, b.col, b.row)
+    for j, t in enumerate(bs.targets):
+        if t.num_id is None:
+            _enum_for_entity("target", j, t.col, t.row)
+
+    return out[:MAX_INSPECT]
 
 
 # ── 主入口 ────────────────────────────────────────────────
