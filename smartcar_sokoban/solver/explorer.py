@@ -182,13 +182,10 @@ def find_observation_point(car_grid: Tuple[int, int],
                            ) -> Optional[Tuple[Tuple[int, int], float]]:
     """找到扫描某个实体的最优观察点.
 
-    扫描不需要贴到实体旁边 — 只要在 90° FOV 内且无遮挡即可。
-    因此从车当前位置用 BFS 向外搜索，每到一个可达格子就检查
-    该处是否对实体有视线（has_line_of_sight），有则作为候选
-    观察点。选择 (移动步数 + 旋转成本) 最小的。
+    新规则 (匹配 engine 严格 FOV): 必须 BFS 到 entity 的 8 邻紧贴格子
+    (距离 ≤ √2), 然后朝向 entity. "怼一下" 才算识别.
 
-    由于 BFS 按距离从近到远搜索，当某一圈的最佳成本已不可能
-    被更远的点超越时提前终止。
+    返回 (obs_pos, face_angle), face_angle 已量化到 π/4 倍数.
     """
     from collections import deque
 
@@ -196,24 +193,43 @@ def find_observation_point(car_grid: Tuple[int, int],
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
 
+    # 8 邻紧贴格子 (上下左右 + 对角), 且必须跟 entity 有视线 (避开墙角遮挡)
+    DIRS_8 = [(1, 0), (-1, 0), (0, 1), (0, -1),
+              (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    adjacent: Set[Tuple[int, int]] = set()
+    for dc, dr in DIRS_8:
+        nc, nr = ec + dc, er + dr
+        if not (0 <= nc < cols and 0 <= nr < rows):
+            continue
+        if grid[nr][nc] == 1:
+            continue
+        if (nc, nr) in obstacles:
+            continue
+        # 视线检查: (nc, nr) 到 entity 之间不能有墙 / 其他实体阻挡
+        # (entity 自己的格子会自动排除)
+        if not has_line_of_sight(nc, nr, ec, er, grid, entity_positions):
+            continue
+        adjacent.add((nc, nr))
+
+    if not adjacent:
+        return None
+
     best = None
     best_cost = float('inf')
 
     # BFS 从车当前位置开始
     visited = {car_grid}
     queue = deque()
-    queue.append((car_grid, 0))  # (pos, move_steps)
+    queue.append((car_grid, 0))   # (pos, move_steps)
 
     while queue:
         (nc, nr), move_steps = queue.popleft()
 
-        # 剪枝: 如果光移动成本就已经 >= 当前最优, 后面更远的也不行了
+        # 剪枝
         if move_steps >= best_cost:
             break
 
-        # 检查该点能否看到实体 (不被墙壁/实体遮挡)
-        if (nc, nr) != (ec, er) and has_line_of_sight(nc, nr, ec, er, grid,
-                                                       entity_positions):
+        if (nc, nr) in adjacent:
             angle_q, rot_steps = _compute_face_cost(
                 nc, nr, ec, er, current_angle)
             total_cost = move_steps + rot_steps
@@ -221,7 +237,7 @@ def find_observation_point(car_grid: Tuple[int, int],
                 best_cost = total_cost
                 best = ((nc, nr), angle_q)
 
-        # 扩展邻居
+        # 扩展 (4 邻 BFS, 因为车走动只能 4 邻 + 离散动作)
         for dx, dy in DIRS_4:
             nx, ny = nc + dx, nr + dy
             if (nx, ny) in visited:

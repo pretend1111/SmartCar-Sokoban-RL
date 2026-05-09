@@ -602,33 +602,51 @@ class GameEngine:
 
     # ── FOV 可见性 (简易模式用) ───────────────────────────
 
-    def _update_fov_visibility(self):
-        """更新 FOV 可见性：检查哪些箱子/目的地在车的视野锥内.
+    # 严格识别参数: 必须近距离 (≤ √2 + ε) + 朝向 entity (±22.5°)
+    IDENT_MAX_DIST = 1.5         # 4 邻 = 1.0, 8 邻 = √2 ≈ 1.414
+    IDENT_HALF_ANGLE = math.pi / 8   # 22.5° (8-向系统的 1 个 tick)
 
-        对每个实体检查 5 个采样点（中心 + 四边偏移），只要任一点
-        在 FOV 内且未被遮挡，即视为可见。这样即使中心射线被墙角
-        遮挡，只要实体的边缘可见也能识别。
+    def _update_fov_visibility(self):
+        """更新 FOV 可见性: 只有 "怼到 entity 旁边 + 朝向 entity" 才算识别.
+
+        新规则 (实车摄像头近距离对准):
+          1. 车与 entity 中心距离 ≤ 1.5 (4 邻或 8 邻紧贴)
+          2. 车头朝向跟 entity 方向夹角 ≤ ±22.5°
+          3. 射线无遮挡
+
+        三个条件全部满足才标记为已识别.
         """
         s = self.state
-        fov_rad = math.radians(self.cfg.fov) / 2.0  # 半角
-        # 采样偏移：中心 + 四边（向内缩 0.1 避免刚好卡在墙上）
-        offsets = [(0, 0), (0.4, 0), (-0.4, 0), (0, 0.4), (0, -0.4)]
 
         for i, box in enumerate(s.boxes):
             if i not in s.seen_box_ids:
-                for ox, oy in offsets:
-                    if self._is_in_fov(box.x + ox, box.y + oy,
-                                       fov_rad, box.x, box.y):
-                        s.seen_box_ids.add(i)
-                        break
+                if self._can_identify_entity(box.x, box.y):
+                    s.seen_box_ids.add(i)
 
         for i, target in enumerate(s.targets):
             if i not in s.seen_target_ids:
-                for ox, oy in offsets:
-                    if self._is_in_fov(target.x + ox, target.y + oy,
-                                       fov_rad, target.x, target.y):
-                        s.seen_target_ids.add(i)
-                        break
+                if self._can_identify_entity(target.x, target.y):
+                    s.seen_target_ids.add(i)
+
+    def _can_identify_entity(self, tx: float, ty: float) -> bool:
+        """严格识别检查: 距离 + 朝向 + 视线不阻挡."""
+        s = self.state
+        dx = tx - s.car_x
+        dy = ty - s.car_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist > self.IDENT_MAX_DIST:
+            return False
+        if dist < 0.01:
+            return True  # 重叠 (理论上不会发生, 兜底)
+
+        angle_to = math.atan2(dy, dx)
+        diff = angle_to - s.car_angle
+        diff = math.atan2(math.sin(diff), math.cos(diff))   # → [-π, π]
+        if abs(diff) > self.IDENT_HALF_ANGLE:
+            return False
+
+        # 视线遮挡 (1.5 距离内基本不可能, 兜底)
+        return not self._ray_blocked(s.car_x, s.car_y, tx, ty, tx, ty)
 
     def _is_in_fov(self, tx: float, ty: float, half_fov: float,
                    exclude_x: float = -999, exclude_y: float = -999) -> bool:
