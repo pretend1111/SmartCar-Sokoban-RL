@@ -218,8 +218,13 @@ def _can_chain_bomb_push(bs: BeliefState, walls: np.ndarray,
 # ── 推箱候选 ──────────────────────────────────────────────
 
 def _gen_push_box_candidates(bs: BeliefState,
-                             feat: DomainFeatures) -> List[Candidate]:
-    """枚举每箱 × 4 方向 (含 1-3 步 macro)."""
+                             feat: DomainFeatures,
+                             enforce_sigma_lock: bool = False) -> List[Candidate]:
+    """枚举每箱 × 4 方向 (含 1-3 步 macro).
+
+    enforce_sigma_lock=True 时 (V2 训练用): 若 push 落到 target cell, 要求 σ 已锁定
+        (Π 在 box-target 这格上是单射). 否则标 illegal — 强制模型先 inspect.
+    """
     out: List[Candidate] = []
     walls = bs.M.astype(bool)
 
@@ -302,6 +307,23 @@ def _gen_push_box_candidates(bs: BeliefState,
                 out.append(cand)
                 continue
 
+            # 3.5) σ-lock 抑制场: 若 box_next 是 target cell 且 σ 未锁, 拒绝 commit
+            if enforce_sigma_lock:
+                target_at_dest = None
+                for j, t in enumerate(bs.targets):
+                    if (t.col, t.row) == (box_next_col, box_next_row):
+                        target_at_dest = j
+                        break
+                if target_at_dest is not None:
+                    pi_row_sum = int(bs.Pi[i].sum())
+                    pi_col_sum = int(bs.Pi[:, target_at_dest].sum())
+                    sigma_locked = (bs.Pi[i, target_at_dest] > 0.5
+                                    and pi_row_sum == 1 and pi_col_sum == 1)
+                    if not sigma_locked:
+                        cand.note = "uncertain σ-commit"
+                        out.append(cand)
+                        continue
+
             # 至此 1-step 合法
             cand.legal = True
             out.append(cand)
@@ -316,6 +338,18 @@ def _gen_push_box_candidates(bs: BeliefState,
                     break
                 if feat.deadlock_mask[next_box_row, next_box_col] and \
                         (next_box_col, next_box_row) not in target_cells_compat:
+                    break
+                # σ-lock 抑制 (macro 落地是 target 也要锁)
+                macro_block_sigma = False
+                if enforce_sigma_lock:
+                    for j2, t2 in enumerate(bs.targets):
+                        if (t2.col, t2.row) == (next_box_col, next_box_row):
+                            pr_s = int(bs.Pi[i].sum())
+                            pc_s = int(bs.Pi[:, j2].sum())
+                            if not (bs.Pi[i, j2] > 0.5 and pr_s == 1 and pc_s == 1):
+                                macro_block_sigma = True
+                            break
+                if macro_block_sigma:
                     break
                 # macro 候选合法
                 macro = Candidate(
@@ -577,13 +611,18 @@ def _gen_inspect_candidates(bs: BeliefState,
 
 def generate_candidates(bs: BeliefState,
                         feat: Optional[DomainFeatures] = None,
-                        max_total: int = MAX_CANDIDATES) -> List[Candidate]:
-    """生成 ≤ max_total 个候选 (含 padding)."""
+                        max_total: int = MAX_CANDIDATES,
+                        enforce_sigma_lock: bool = False) -> List[Candidate]:
+    """生成 ≤ max_total 个候选 (含 padding).
+
+    enforce_sigma_lock=True (V2): 推到 target cell 的 push 必须 σ 锁定 (Π 单射)
+        否则标 illegal — 强制 inspect 优先.
+    """
     if feat is None:
         feat = compute_domain_features(bs)
 
     cands: List[Candidate] = []
-    cands.extend(_gen_push_box_candidates(bs, feat))
+    cands.extend(_gen_push_box_candidates(bs, feat, enforce_sigma_lock=enforce_sigma_lock))
     cands.extend(_gen_push_bomb_candidates(bs, feat))
     cands.extend(_gen_inspect_candidates(bs, feat))
 

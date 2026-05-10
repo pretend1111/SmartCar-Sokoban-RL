@@ -192,7 +192,13 @@ def train(args):
     val_idx = idx[n_train:]
 
     train_phases = dataset.phase[train_idx]
-    target_dist = {1: 0.05, 2: 0.10, 3: 0.15, 4: 0.25, 5: 0.20, 6: 0.25}
+    if args.phase_dist == "default":
+        target_dist = {1: 0.05, 2: 0.10, 3: 0.15, 4: 0.25, 5: 0.20, 6: 0.25}
+    elif args.phase_dist == "hard":
+        # 上采样 phase 5/6 (含炸弹), 下调 phase 1-2
+        target_dist = {1: 0.03, 2: 0.05, 3: 0.10, 4: 0.20, 5: 0.32, 6: 0.30}
+    else:
+        raise ValueError(f"unknown phase_dist {args.phase_dist}")
     weights_full = make_phase_weights(train_phases, target_dist)
     sampler = torch.utils.data.WeightedRandomSampler(
         weights_full.tolist(), num_samples=len(train_idx), replacement=True
@@ -322,6 +328,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--init-ckpt", default=None,
                         help="path to initial ckpt (for fine-tune / DAgger).")
+    parser.add_argument("--phase-dist", default="default", choices=["default", "hard"],
+                        help="phase 采样权重: default=5/10/15/25/20/25, hard=3/5/10/20/32/30")
     args = parser.parse_args()
     train(args)
 
