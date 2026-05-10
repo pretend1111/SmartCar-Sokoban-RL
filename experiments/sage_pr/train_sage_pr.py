@@ -1,9 +1,11 @@
 """SAGE-PR Stage A — BC 预训练.
 
-输入: 多个 npz (build_dataset_v3 输出), 合并成 phase-stratified 大数据集.
-损失:
-    L = L_policy + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress
-    (P3 完整版会加 ranking loss 与 info_gain. 此 Stage A 只用 BC + value 估算.)
+输入: 多个 npz (build_dataset_v3 / v5 / v6 输出), 合并成 phase-stratified 大数据集.
+损失 (FINAL_ARCH_DESIGN.md §5.2):
+    L = L_policy + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress + 0.1·L_info
+    L_info GT = X_cand[:, :, 108]  (cand_features 段 [108:118] 信息增益 = viewpoint
+                  的 info_gain_heatmap, 非 inspect 候选自然为 0)
+    (L_ranking 需 P3.4 hard negative, 暂未实现)
 
 优化:
     AdamW lr=3e-4 cosine -> 3e-5
@@ -143,7 +145,16 @@ def compute_losses(model, batch, device):
     target_pg = torch.ones_like(selected_pg) * 0.5
     loss_progress = F.smooth_l1_loss(selected_pg, target_pg)
 
-    total = loss_policy + 0.3 * loss_value + 0.2 * loss_deadlock + 0.2 * loss_progress
+    # Info-gain head 监督: GT = X_cand[:, :, 108] (cand_features 段 [108]: viewpoint
+    # 的 info_gain_heatmap, 非 inspect 候选自然为 0). per-cand smooth-L1.
+    target_ig = X_cand[:, :, 108].detach()                     # [B, 64]
+    loss_info = F.smooth_l1_loss(info_gain, target_ig)
+
+    total = (loss_policy
+             + 0.3 * loss_value
+             + 0.2 * loss_deadlock
+             + 0.2 * loss_progress
+             + 0.1 * loss_info)
 
     # 准确率 (top-1)
     with torch.no_grad():
@@ -154,6 +165,7 @@ def compute_losses(model, batch, device):
         "value": loss_value.item(),
         "deadlock": loss_deadlock.item(),
         "progress": loss_progress.item(),
+        "info": loss_info.item(),
         "acc": acc,
     }
 

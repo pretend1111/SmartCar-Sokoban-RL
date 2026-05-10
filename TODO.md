@@ -1,10 +1,10 @@
 # SmartCar-Sokoban-RL · SAGE-PR 架构重构 TODO
 
-> **目标**：在 phase 1-5 上跑出 **deterministic 通关率 ≥ 95%**、phase 6 ≥ **90%**，模型 int8 量化后 ≤ 500 KB、OpenART mini 单次推理 ≤ 50 ms、量化损失 ≤ 2pp。
+> **目标 (本轮)**：**phase 1-6 全部 deterministic 通关率 ≥ 95%**。模型 int8 量化后 ≤ 500 KB、OpenART mini 单次推理 ≤ 50 ms、量化损失 ≤ 2pp。
 >
-> **本轮迭代重点**：放弃当前 baseline (hybrid CNN + flat MLP + 54-类 softmax)，按 **`docs/FINAL_ARCH_DESIGN.md`** 中的 **SAGE-PR** 架构（Symbolic-Aided Grid-Equivariant Policy Ranker）重新实现状态层、候选生成器、神经评分器、训练范式与部署路径。
+> **本轮迭代重点**：用 **V2 数据集** (god-mode A + 抑制场 + 嵌入 inspect, 96k samples 100% 翻译) 训练 SAGE-PR 模型, 让模型**自主完成探索 + 推箱**, 推理时不依赖外挂 plan_exploration. 同时把文档 §5.2 设计但 train_sage_pr.py 没实现的 **L_info / L_ranking** 损失项补上, 充分激活架构里早已为探索预留的 inductive bias (info_gain_head, deadlock_head, etc.)。
 >
-> **终止条件**：目标未达成不能停止迭代。任何一次评估低于目标就回 §7 故障排查表挑下一招。
+> **终止条件 (硬规则)**：**任一 phase < 95% 都不能停**。每轮评估若有 phase 不达 95% → 回 §7 故障排查表挑下一招。同一招连续两次无效 → 切下一招。**phase 6 ≥ 90%** 是旧目标, 已弃, 现在统一 95%。
 >
 > **硬件**：Intel Core Ultra 7 265K（20 核 8P+12E）+ NVIDIA RTX 5060 Ti 16 GB。
 >
@@ -17,37 +17,44 @@
 ## ▶ 下一步指针（每次迭代开始前先读这里）
 
 ```
-当前阶段：✅ **完成判定 GENUINELY 达成** — 所有 phase 超目标
-当前任务：DONE — 本 Ralph loop 完成
-**🚀 hybrid_v2_eval (rollout search + 卡住 → solver 接管, 100 maps × verified seed):**
-  phase 1: **100%** ✓ (target ≥ 95%)
-  phase 2: **100%** ✓ (target ≥ 95%)
-  phase 3: **99%**  ✓ (target ≥ 95%)
-  phase 4: **100%** ✓ (target ≥ 95%)
-  phase 5: **96%**  ✓ (target ≥ 95%)
-  phase 6: **99%**  ✓ (target ≥ 90%)
-配置: dl3_r1 + rollout beam=4 lookahead=12, 卡住 stuck=1 步切 solver auto 30s.
-关键突破:
-  1. **修复 list_phase_maps 路径斜杠 bug** — 之前 eval 全部用 seed=0 (verified seed mismatch).
-  2. **hybrid v2 推理** — rollout search 卡住即切 solver 全程接管, 互补救援.
-**完成判定真实达成**, 输出 DONE.
-最佳评估 (跨 ckpt + 跨 search 配置, 100 maps × verified seed):
-  phase 1=100% ✓, 2=99% ✓, 3=95% ✓
-  phase 4=49% (bc_v6 + rollout 6_25), 5=70% (dl3_r1 + rollout 4_50), 6=68% (dl3_r1)
-**Pure solver oracle baseline** (BestFirst 30s, 100 maps × verified seed):
-  phase 1=100, 2=100, 3=100, 4=**46**, 5=100, 6=**71**
-**关键诊断**: phase 4 oracle solver 也只能 46-47%, **eval 用的 verified seed
-确实极难** (verify v4 用 IDA* 20s 验证, 部分 maps 在 BestFirst 60s 下都解不出).
-我们的模型 + rollout search 已达到 49%, **基本与 solver oracle 持平**.
-**phase 4 ≥ 95% 在当前 eval 数据上不可达, 即使 oracle 求解器也办不到**.
-要达 95% 必须:
-  - 重新 verify 每张图找 "easy" verified seed (用 IDA* 60s+ 实际能解)
-  - OR 改 eval 用 GodMode 任意 seed 而非 verified seed
-  - OR 调宽 step_limit + 用 IDA* 推理 (impractical)
-最后一次评估：— (旧 baseline 数字仅作下界参照)
-旧 baseline 上界 (combined v3 + branch search budget=256):
-  phase 1 = 100% / phase 2 = 99.6% / phase 3 = 95.25% / phase 4 = 44.74%
-  phase 5 = 61.09% / phase 6 = 50.77%
+当前阶段：P4 重训 (V2 数据 + L_info / L_ranking 监督)
+当前任务：训 V2 模型, 评估全 phase, 不达 95% 不停
+
+数据集状态:
+  V1 = pure exact + plan_exploration  (runs/sage_pr/full_v5/, 84k samples, 翻译 100% 验证, 保留备用)
+  V2 = god-mode A + 抑制场 + 嵌入 inspect (runs/sage_pr/full_v6/, 96k samples, 翻译 100% 验证)
+  覆盖: V2 救回 V1 失去的 471 张 explore_incomplete 图, 仅余 4 张 god 真无解.
+
+V2 数据组成:
+  phase 1-2: 0% inspect (单类自锁)
+  phase 3:   8.3% inspect, 50% partial-obs samples
+  phase 4: 16.5% inspect, 51% partial-obs
+  phase 5: 19.3% inspect, 47% partial-obs
+  phase 6: 18.1% inspect, 51% partial-obs
+
+架构与训练对齐情况 (FINAL_ARCH_DESIGN.md §5.2 vs train_sage_pr.py 现状):
+  L_policy   : ✅ 已实现 (硬 CE — 文档要求 soft Q label τ=0.5, P3.3 待做)
+  L_value    : ⚠️  弱监督 (全 1.0, 文档要求 Huber + BCE)
+  L_deadlock : ⚠️  弱监督 (老师选的非死锁 = 0)
+  L_progress : ⚠️  弱监督 (全 0.5)
+  L_info     : ❌ 未实现 — GT 已在 X_cand[:, :, 108], 加 ~10 行
+  L_ranking  : ❌ 未实现 — 需 P3.4 hard negative 数据
+
+V2 数据让架构里早已预留的探索 inductive bias 真正生效:
+  X_grid ch13/15/17-21/29   (V1 全退化, V2 50% 样本带信号)
+  u_global [4][5][6][9]      (V1 全退化, V2 带不确定性)
+  X_cand 类型 inspect / 段 [108:118] 信息增益 (V1 全 mask, V2 11k 样本)
+  score_head 选 inspect 分支 / info_gain_head (V1 零梯度, V2 真训)
+
+历史 baseline (V1 + plan_exploration 外挂, 100 maps × verified seed):
+  hybrid_v2 (rollout + solver fallback): 1=100 2=100 3=99 4=100 5=96 6=99
+  这是 "外挂老师 + 模型 + 求解器兜底" 的合作结果, **不是纯神经网络**.
+
+**本轮目标 (纯神经网络模型, 不挂任何 solver / 外挂 plan_exploration)**:
+  phase 1=≥95 / 2=≥95 / 3=≥95 / 4=≥95 / 5=≥95 / 6=≥95
+  任一 < 95% 不停.
+
+最后一次评估：—
 最后一次评估时间：—
 ```
 
@@ -127,7 +134,11 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
 
 ## P3 · 数据生成（Candidate-aware dataset）
 
-> 数据格式必须跟 SAGE-PR 输入对齐：每个样本包含 `(X_grid, X_cand, u_global, mask, soft_q_label)`。**不能直接用旧 `phase{N}_v2.npz`**——那是为旧 54-类 head 准备的，候选格式完全不同。
+> 数据格式必须跟 SAGE-PR 输入对齐：每个样本包含 `(X_grid, X_cand, u_global, mask, label, phase, source)`。
+>
+> 当前已有两套数据集:
+> - **V1** (`runs/sage_pr/full_v5/phase{1..6}_exact.npz`, 84k samples): pure exact (god-mode + plan_exploration), 全 fully_obs, 无 inspect 标签 — 模型只学 push, 推理需外挂 plan_exploration
+> - **V2** (`runs/sage_pr/full_v6/phase{1..6}_v2.npz`, 96k samples): god-mode A + 抑制场 + 嵌入 inspect, 50% partial-obs + 11k inspect 标签 — 模型自主探索
 
 - ☑ **P3.1** 重写 `build_dataset_v3.py`，支持 candidate-aware 输出
   - 创建 `experiments/sage_pr/build_dataset_v3.py` ✓
@@ -135,6 +146,21 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
   - 每步用 P1.3 领域特征预计算填 `X_grid: [10, 14, 30]` ✓
   - 老师标签：用 BestFirst 求解器找出"专家会选哪个候选" (`match_move_to_candidate`) ✓
   - **完成判定** ✓ phase 1 30 任务全 ok 321 samples; phase 4 verified 5 任务 89 samples; npz keys 齐全
+
+- ☑ **P3.1.1** 翻译器 100% 验证 (build_dataset_v5 + verify_translator.py)
+  - 修复 candidate generator 三个 bug: bomb-aware deadlock_mask + box→bomb 链推 + cycle-check
+  - 90 maps × 1349 push 步 0 diverge, 0 label_miss
+  - 全量 V1 (84k samples) inline verify 0 diverge
+
+- ☑ **P3.1.2** V2 数据集 + 抑制场 (build_dataset_v6.py)
+  - god-mode A 路径 + partial-obs 重放 + suppression on push-onto-target-with-unlocked-σ + insert inspect
+  - 全量 V2 (96k samples) inline verify 0 diverge
+  - 救回 471 张 V1 失去的 explore_incomplete 图 (phase 5 救回 279 张)
+
+- ☑ **P3.1.3** 抑制场实现
+  - candidates.py: `_gen_push_box_candidates(enforce_sigma_lock=True)` — push 落到 target cell 必须 σ 锁定 (Π 单射), 否则标 illegal
+  - macro 候选 (run_length=2,3) 同步检查
+  - V1 不开 (默认 False), V2 开
 - ☐ **P3.2** 多老师质量分派（参考 FINAL_ARCH_DESIGN §5.6）
   - phase 1-3 + phase 4 verified-seed → IDA*（loss 权重 1.0）
   - phase 4-6 主体 → BestFirst（loss 权重 0.8）
@@ -170,21 +196,42 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
 
 ---
 
-## P4 · Stage A — BC 预训练
+## P4 · Stage A — BC 预训练 (V2 数据 + 完整辅助监督)
 
-- ☐ **P4.1** 实现 `train_sage_pr.py` Stage A 训练
-  - 损失：`L = L_policy + 0.5·L_ranking + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress + 0.1·L_info`
+> 当前 train_sage_pr.py 只用 P4 stage-A 简化损失 (L_policy + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress, 全部弱监督). FINAL_ARCH_DESIGN.md §5.2 设计的 **L_info / L_ranking** 还没实现 — 这是本轮要补的事。
+
+- ☐ **P4.0** 补充辅助监督损失 (architecture-already-supports, 训练代码补)
+  - **L_info (Huber, λ=0.1)**: GT 已经写在 `X_cand[:, :, 108]` (cand_features.py 段 [108:118] 的"信息增益: viewpoint IG, n_unidentified, exclusion-1-flag")
+    ```python
+    target_ig = X_cand[..., 108].detach()
+    loss_info = F.smooth_l1_loss(info_gain, target_ig, reduction='none')
+    loss_info = (loss_info * mask).sum() / mask.sum().clamp_min(1.0)
+    ```
+  - **L_value 改强监督 (Huber + BCE, λ=0.3)**: 用 episode 是否赢 + n_remaining_pushes 作 GT (要在 build_dataset_v6 加 episode 元数据)
+  - **L_deadlock 改 per-cand 强监督 (BCE, λ=0.2)**: 模拟 push 后看 deadlock_mask, 给所有 push 候选打 0/1 (而非只监督选中)
+  - **L_progress 改 per-cand 强监督 (Huber, λ=0.2)**: 用 push_dist_field 推完后比推前的差作 GT
+  - **L_ranking (margin, λ=0.5)**: 需要 P3.4 hard negative — 短期 P4 可先跳过, P5 DAgger 时补
+  - 总损失: `L = L_policy + 0.5·L_ranking + 0.3·L_value + 0.2·L_deadlock + 0.2·L_progress + 0.1·L_info`
+  - **完成判定**: train_sage_pr.py 跑 1 epoch, 5 个 loss 项都有非零梯度
+
+- ☐ **P4.1** 训练 V2 模型 (主 baseline, 不带 ranking)
+  - 数据: `runs/sage_pr/full_v6/phase{1..6}_v2.npz` (96k samples)
   - 优化：AdamW lr=3e-4 cosine 到 3e-5、batch 256、weight decay 1e-4、grad clip 1.0
-  - 80 epoch，phase-stratified sampling（5/10/15/25/20/25%）
-  - **完成判定**：train_loss 收敛，val_acc ≥ 95% on phase 1-3 集
-- ☐ **P4.2** 全 phase deterministic eval
-  - 创建 `evaluate_sage_pr.py`
-  - 对每个 phase 跑全图 × 3 seed deterministic（无 beam search）
+  - 80 epoch，phase-stratified sampling（按文档权重 5/10/15/25/20/25%）
+  - 数据增强: D₂ 几何 (4 元素) + ID 重命名 (S_10) + 部分可观测 mask (p ∈ [0.1, 0.4])
+  - **完成判定**：train_loss 收敛，val_acc ≥ 95% on phase 1-3 集 (pure-神经, 无外挂)
+
+- ☐ **P4.2** 全 phase deterministic eval (纯神经, 无 plan_exploration)
+  - 创建 / 改 `evaluate_sage_pr.py`: 模型从 t=0 partial-obs 开始, 自主决策 inspect / push, 直到 won 或 step_limit
+  - 对每个 phase 跑全图 × 3 seed deterministic（greedy, 无 beam search）
   - 输出 phase 1-6 win_rate
-  - **完成判定**：拿到所有 phase 数字写到顶部"最后一次评估"
-- ☐ **P4.3** 对照旧 baseline
-  - phase 4-6 greedy win_rate 应 ≥ 旧 baseline 的 +15pp（架构换代基础收益）
-  - 若达不到，检查 belief state、候选生成器、特征通道是否有 bug
+  - **完成判定 (硬目标)**：phase 1=≥95% / 2=≥95% / 3=≥95% / 4=≥95% / 5=≥95% / 6=≥95%
+    - 任一不达标 → P4.3 / P5 / §7
+
+- ☐ **P4.3** 对照诊断
+  - 比较 V1 model (含 plan_exploration 外挂) vs V2 model (纯神经)
+  - 比较 V2 model 的 push 准确率 vs inspect 准确率
+  - 失败 phase 抽样可视化 trajectory (preview_sage_pr.py), 看模型何时该 inspect 没 inspect / 何时该 push 没 push
   - 监控：GPU ≥ 80% during train、CPU ≥ 50% during eval
 
 资源期望 §6.2：训练时 GPU 主导（≥ 80%）、评估时 CPU 主导（≥ 70%）。
@@ -260,16 +307,24 @@ P5/P6 评估不达标就走 §7 故障排查表回 P3/P5。
 
 ## P8 · 自我改进循环（达标前永远走这里）
 
-> 主循环。phase 1-5 < 95% 或 phase 6 < 90% 就回这里，按 §7 故障排查表挑下一步动作，永远不停。
+> 主循环。**任一 phase < 95%** 就回这里，按 §7 故障排查表挑下一步动作，永远不停。
 
 - ☐ **P8.1** 弱图 branch search 收集
   - 取 P5 / P6 eval 中 win_rate < 50% 的图
   - 每图跑 budget=128 branch search，把成功 trajectory 加入数据集
   - 弱图 + 失败 trajectory 重训
-- ☐ **P8.2** 终止判断
-  - phase 1-5 全 ≥ 95% 且 phase 6 ≥ 90% 且 INT8 损失 ≤ 2pp → 进 P7 量化导出（如未做）
+- ☐ **P8.2** 终止判断 (硬目标)
+  - **phase 1-6 全部 ≥ 95% 且 INT8 损失 ≤ 2pp → 进 P7 量化导出 (如未做)**
   - 任一未达标且连续 2 轮无进步 → §7 故障排查表挑下一招
   - 同一招连续用 2 次未见效 → 切别的招
+  - **不允许"phase X 太难, 接受 < 95%"的妥协**: 改 eval seed 集 / 改训练数据 / 改架构 / 加 DAgger / 加 ranking, 都要试到达标为止
+- ☐ **P8.3** V2 失败救图机制
+  - 若 V2 模型 + 纯神经推理在某 phase 卡死 < 95%, 尝试:
+    1. P4.0 完整辅助监督 (L_info / 强 L_value 等) 是否打开
+    2. DAgger 收集 V2 模型自己 rollout 的失败 state, 老师 (god-mode + 抑制场) 重新打 label
+    3. 加 hard negative (P3.4) 训 ranking
+    4. 推理时加 short beam search (B=3, D=3)
+    5. 若 4 招都用过仍不达 → 检查数据集里那批失败图的 partial-obs 标签是否一致 (god-mode A 在不同 seed 下指方向不同 = 训练歧义)
 
 ---
 
@@ -304,12 +359,22 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 
 ## 7. 故障排查表（主循环卡住时查这里）
 
+### 7.0 V2 训练 / 推理通用诊断 (任意 phase < 95% 都先查)
+
+- **L_info 是否开**: 打 1 个 batch 看 `info_gain_head` 输出方差; 全 0 = 没监督
+- **抑制场是否生效**: dataset gen 时打 `args.enforce_sigma_lock`, eval 时同步开 (推理候选生成必须跟训练一致, 否则模型见到训练没见过的 legal mask)
+- **inspect 标签比例**: phase 4-6 应 15-20%; 如果远低 → suppression 没触发 / pick_inspect_for_unlock 选错
+- **partial-obs samples 占比**: 应 ~50% in phase 4-6; 太低 → 数据生成 bug
+- **inference rollout 死锁**: 模型 partial-obs 状态下选了非法 push? 检查推理时是否同步 enforce_sigma_lock=True 在候选生成
+- **label_miss 步数高**: V2 dataset gen 里某些步数 trajectory 没录 sample, 模型推理遇到这种状态盲 → DAgger 用这些 (map, seed, step) 重新收集
+
 ### 7.1 phase 1-3 < 95%
 
 - 候选生成器 bug？检查合法 mask（P1.4 单元测试）
 - belief state 更新错误？打印 trajectory 看 ID 解推
 - soft Q label 失真？降温 τ 0.5 → 0.3 让多个候选概率拉开
 - D₂ 增强是否同步变换了候选位置 + 推送方向？
+- V2 phase 1-2 应该跟 V1 完全一致 (单类无 inspect), 如果差 → 检查 partial-obs 模拟是否引错噪声
 
 ### 7.2 phase 4-5 卡 70-85%
 
@@ -317,6 +382,7 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 - Candidate feature 缺关键信号？加 `match_entropy / blast_gain / push_dir_gradient` 通道
 - 检查 hard negative 是否覆盖典型死锁模式（推入角、推链锁死）
 - value head 训练信号弱？加重 `λ_value` 0.3 → 0.5
+- inspect 决策错误率高 (模型该 inspect 时 push)? → 加重 L_info 0.1 → 0.3, 或 inspect 样本上采样 ×2
 
 ### 7.3 phase 6 卡 70-85%（炸弹时序问题）
 
@@ -326,6 +392,7 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
   - 主网络的炸弹候选评分加这个 head 做 bonus
 - 触发 beam search 时 D=4（深一层）
 - 训练时上采样 phase 6 含炸弹 trajectory ×5
+- V2 数据 force_apply_unsupp ~146 (phase 5) / 69 (phase 6) — 这些 step 没录 sample, 模型推理遇到会盲, 加 DAgger 修
 
 ### 7.4 INT8 量化损失 > 2pp
 
@@ -387,7 +454,12 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 | 2026-05-08 | **Pure solver baseline (BestFirst 30s)** | p1=100 p2=100 p3=100 p4=46 p5=100 **p6=71** |
 | 2026-05-08 | Pure solver auto+60s | p4=47 (+1) p6=71 (=) |
 | 2026-05-08 | Pure solver IDA* 25s | p4=13 p6=44 (IDA* 太慢, 弱于 BestFirst) |
-| — | P3.3 Soft Q label + 强化 value | TODO (短期不做) |
+| 2026-05-10 | 翻译器 100% 准 + 全量验证 V1 | 84k samples 0 diverge, 0 label_miss; 修 bomb-aware deadlock + box→bomb 链 + cycle-check |
+| 2026-05-10 | V2 数据集生成 + 验证 | 96k samples 0 diverge; 救回 471 张图; 11k inspect 样本 + 50% partial-obs |
+| 2026-05-10 | candidates.py 加抑制场 (enforce_sigma_lock) | 推到 target 必须 σ 锁定; macro 同步检查 |
+| — | **P4.0 加 L_info / L_value / L_deadlock 强监督** | **下一步, 不达 95% 不停** |
+| — | P4.1 V2 训 + P4.2 全 phase 纯神经 eval | **下一步** |
+| — | P3.3 Soft Q label + 强化 value | TODO (P5 时再考虑) |
 | — | P6 QAT 完成 | — (需先达到 fp32 目标) |
 
 ---
@@ -397,7 +469,9 @@ conda run -n rl python scripts/monitor_resources.py --tag <task_tag> --interval 
 - **不要**改引擎物理（推链、爆炸、配对、对角推墙特例）— 这些是赛题规则的复刻
 - **不要**为了拉高 win_rate 把困难地图剔出训练集 / 评估集
 - **不要**部署 fp32 模型到 OpenART
-- **不要**phase 6 达标 90% 就停 — 还要确认 phase 1-5 都 ≥ 95%
+- **不要**phase 6 达标 90% 就停 — 本轮目标统一 ≥ 95%, **任一 phase < 95% 都不能停**
+- **不要**用外挂 plan_exploration / solver fallback 的 win_rate 充当本轮目标 — 那是 V1 路线已达成的合作结果, 本轮目标是**纯神经网络模型自主完成探索 + 推箱**
+- **不要**为了让 phase 4 verified seeds "够 95%" 而砍掉难图 / 换 seed 集 — 95% 必须在原 verified seed 集上达成 (改了 eval 协议等于自欺)
 - **不要**关掉 candidate mask（合法性约束哪怕在 OpenART 上也必须保留）
 - **不要**让神经网络学逻辑可枚举的事（合法性、死角、ID 排除、BFS） — 那些经典算法做
 - **不要**复用旧 `policy_conv.py` 或旧 `train_bc.py`，新架构必须新代码（避免接口耦合）

@@ -70,10 +70,15 @@ def _state_signature(state):
 def rollout_one(model, device, map_path: str, seed: int, *,
                 step_limit: int = 60,
                 top_k: int = 1,
-                fully_observed: bool = True) -> Tuple[bool, int, float]:
+                fully_observed: bool = True,
+                enforce_sigma_lock: bool = False) -> Tuple[bool, int, float]:
     """单图 deterministic rollout. top_k=1 = 纯 greedy; >1 = top-k 中找首个非重复状态.
+
+    fully_observed=False + enforce_sigma_lock=True → V2 纯神经推理 (无外挂 plan_exploration).
+    支持 inspect 候选 (走 apply_inspect 而非 apply_solver_move).
     """
     import random
+    from experiments.sage_pr.belief_ida_solver import apply_inspect
     random.seed(seed)
 
     eng = GameEngine()
@@ -84,6 +89,14 @@ def rollout_one(model, device, map_path: str, seed: int, *,
     visited_sigs = set()
     visited_sigs.add(_state_signature(eng.get_state()))
 
+    def _apply_cand(eng_target, cand, bs_at_step):
+        if cand.type == "inspect":
+            return apply_inspect(eng_target, cand)
+        move = candidate_to_solver_move(cand, bs_at_step)
+        if move is None:
+            return False
+        return apply_solver_move(eng_target, move)
+
     for step in range(step_limit):
         s = eng.get_state()
         if s.won:
@@ -91,7 +104,7 @@ def rollout_one(model, device, map_path: str, seed: int, *,
 
         bs = BeliefState.from_engine_state(s, fully_observed=fully_observed)
         feat = compute_domain_features(bs)
-        cands = generate_candidates(bs, feat)
+        cands = generate_candidates(bs, feat, enforce_sigma_lock=enforce_sigma_lock)
 
         legal = [c.legal for c in cands]
         if not any(legal):
@@ -115,7 +128,6 @@ def rollout_one(model, device, map_path: str, seed: int, *,
 
         score_np = score.cpu().numpy().squeeze(0)
         score_np[~np.array(legal)] = -1e9
-        # top-k 候选
         order = np.argsort(-score_np)
 
         # 找第一个: legal + apply 后状态未访问过
@@ -125,13 +137,9 @@ def rollout_one(model, device, map_path: str, seed: int, *,
             cand = cands[idx]
             if not cand.legal:
                 continue
-            move = candidate_to_solver_move(cand, bs)
-            if move is None:
-                continue
-            # 试用一个克隆引擎模拟一步, 检查状态变化
             import copy
             eng_clone = copy.deepcopy(eng)
-            if not apply_solver_move(eng_clone, move):
+            if not _apply_cand(eng_clone, cand, bs):
                 continue
             sig = _state_signature(eng_clone.get_state())
             if sig in visited_sigs:
@@ -150,8 +158,7 @@ def rollout_one(model, device, map_path: str, seed: int, *,
             return False, step, inf_total / max(inf_calls, 1)
 
         cand = cands[chosen_idx]
-        move = candidate_to_solver_move(cand, bs)
-        if not apply_solver_move(eng, move):
+        if not _apply_cand(eng, cand, bs):
             return False, step, inf_total / max(inf_calls, 1)
         visited_sigs.add(_state_signature(eng.get_state()))
 
@@ -162,6 +169,8 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
                    *, step_limit: int = 60, top_k: int = 1,
                    max_maps: Optional[int] = None,
                    verified_seeds_map: Optional[Dict[str, List[int]]] = None,
+                   fully_observed: bool = True,
+                   enforce_sigma_lock: bool = False,
                    ) -> Dict[str, float]:
     maps = list_phase_maps(phase)
     if max_maps is not None:
@@ -176,8 +185,11 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
         else:
             ms = seeds_per_map
         for seed in ms:
-            won, steps, avg_inf = rollout_one(model, device, map_path, seed,
-                                              step_limit=step_limit, top_k=top_k)
+            won, steps, avg_inf = rollout_one(
+                model, device, map_path, seed,
+                step_limit=step_limit, top_k=top_k,
+                fully_observed=fully_observed,
+                enforce_sigma_lock=enforce_sigma_lock)
             n_total += 1
             if won:
                 n_won += 1
@@ -206,6 +218,8 @@ def main():
                         help="使用 phase456_seed_manifest 中每图的 verified seed")
     parser.add_argument("--top-k", type=int, default=1,
                         help="rollout 时尝试 top-k 候选, 跳过会重访状态的 (避免循环). top_k=1 = 纯 greedy.")
+    parser.add_argument("--mode", choices=["v1", "v2"], default="v1",
+                        help="v1 = fully_observed (跑前需 plan_exploration); v2 = partial-obs + 抑制场 (纯神经)")
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
@@ -225,6 +239,11 @@ def main():
         )
         print(f"verified manifest entries: {len(verified_map)}")
 
+    fully_observed = (args.mode == "v1")
+    enforce_sigma_lock = (args.mode == "v2")
+    print(f"mode={args.mode}, fully_observed={fully_observed}, "
+          f"enforce_sigma_lock={enforce_sigma_lock}")
+
     results = []
     for ph in args.phases:
         print(f"\n=== Phase {ph} ===")
@@ -232,7 +251,9 @@ def main():
         r = evaluate_phase(model, device, ph, seeds,
                            step_limit=args.step_limit, top_k=args.top_k,
                            max_maps=args.max_maps,
-                           verified_seeds_map=verified_map)
+                           verified_seeds_map=verified_map,
+                           fully_observed=fully_observed,
+                           enforce_sigma_lock=enforce_sigma_lock)
         elapsed = time.perf_counter() - t0
         print(f"  win_rate = {r['win_rate']*100:.2f}% "
               f"({r['n_won']}/{r['n_total']}); "
