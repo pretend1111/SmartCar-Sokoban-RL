@@ -367,16 +367,16 @@ def _gen_push_box_candidates(bs: BeliefState,
 
 
 # ── 推炸弹候选 ────────────────────────────────────────────
+# 4-方向系统: 炸弹只能 4 方向推 (对角推已禁用)
 
 DIRS_8 = (
     (1, 0), (-1, 0), (0, 1), (0, -1),
-    (1, 1), (1, -1), (-1, 1), (-1, -1),
 )
 
 
 def _gen_push_bomb_candidates(bs: BeliefState,
                               feat: DomainFeatures) -> List[Candidate]:
-    """每炸弹 × 8 方向 (含 4 对角)."""
+    """每炸弹 × 4 方向."""
     out: List[Candidate] = []
     walls = bs.M.astype(bool)
 
@@ -485,14 +485,13 @@ def _gen_inspect_candidates(bs: BeliefState,
     for t in bs.targets:
         entity_pos.add((t.col, t.row))
 
+    # 4-方向系统: inspect viewpoint 只在 entity 的 4-邻
     DIRS_8 = (
         (1, 0), (-1, 0), (0, 1), (0, -1),
-        (1, 1), (1, -1), (-1, 1), (-1, -1),
     )
-    # heading 量化: dc, dr → 0..7 (东=0, SE=1, 南=2, ..., NE=7)
+    # heading 量化: 仅 4 方向 (东=0, 南=2, 西=4, 北=6); 跟旧 heading 0/2/4/6 对齐
     DIR_TO_HEADING = {
-        (1, 0): 0, (1, 1): 1, (0, 1): 2, (-1, 1): 3,
-        (-1, 0): 4, (-1, -1): 5, (0, -1): 6, (1, -1): 7,
+        (1, 0): 0, (0, 1): 2, (-1, 0): 4, (0, -1): 6,
     }
 
     out: List[Candidate] = []
@@ -565,20 +564,18 @@ def _gen_inspect_candidates(bs: BeliefState,
         coverage.add((c.inspect_target_type, c.inspect_target_idx))
 
     def _enum_loose(etype: str, eidx: int, ec: int, er: int):
-        # 找距 entity ≤ 3 的可达 cell, 任意方向
-        for dr in range(-3, 4):
-            for dc in range(-3, 4):
-                nc, nr = ec + dc, er + dr
+        # 4-方向系统: 只在 entity 同行/同列 (cardinal axis) 找距 ≤ 3 的可达 cell
+        for d in [-3, -2, -1, 1, 2, 3]:
+            for axis in ['col', 'row']:
+                if axis == 'col':
+                    nc, nr = ec + d, er; hdc, hdr = (-1 if d > 0 else 1), 0
+                else:
+                    nc, nr = ec, er + d; hdc, hdr = 0, (-1 if d > 0 else 1)
                 if not (0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS):
                     continue
                 if walls[nr, nc] or (nc, nr) in obstacles:
                     continue
                 if not feat.reachable_mask[nr, nc]:
-                    continue
-                # heading 朝 entity 大致方向 (取符号化 dc, dr)
-                hdc = -1 if dc > 0 else (1 if dc < 0 else 0)
-                hdr = -1 if dr > 0 else (1 if dr < 0 else 0)
-                if (hdc, hdr) == (0, 0):
                     continue
                 heading = DIR_TO_HEADING.get((hdc, hdr), 0)
                 key = (nc, nr, etype, eidx)

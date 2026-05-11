@@ -174,8 +174,8 @@ class GameEngine:
         # ── 吸附检测：如果不在网格上，先吸附 ──────────────
         snap_x = round(s.car_x - 0.5) + 0.5
         snap_y = round(s.car_y - 0.5) + 0.5
-        # 角度吸附到最近的 45° 倍数
-        snap_angle = round(s.car_angle / (math.pi / 4)) * (math.pi / 4)
+        # 角度吸附到最近的 90° 倍数 (4 方向系统)
+        snap_angle = round(s.car_angle / (math.pi / 2)) * (math.pi / 2)
         snap_angle = math.atan2(math.sin(snap_angle), math.cos(snap_angle))
 
         needs_snap = (abs(s.car_x - snap_x) > 0.01 or
@@ -193,16 +193,21 @@ class GameEngine:
             return self.get_state()
 
         # ── 正常离散动作 ──────────────────────────────────
-        if action == 4:  # 左转 45°
-            s.car_angle -= math.pi / 4
+        if action == 4:  # 左转 90° (4 方向系统)
+            s.car_angle -= math.pi / 2
             s.car_angle = math.atan2(math.sin(s.car_angle),
                                      math.cos(s.car_angle))
-        elif action == 5:  # 右转 45°
-            s.car_angle += math.pi / 4
+        elif action == 5:  # 右转 90° (4 方向系统)
+            s.car_angle += math.pi / 2
             s.car_angle = math.atan2(math.sin(s.car_angle),
                                      math.cos(s.car_angle))
         elif action in ACTION_TO_ABS_WORLD_MOVE:
             dx, dy = ACTION_TO_ABS_WORLD_MOVE[action]
+            # 禁用对角 abs world move (action 11-14): dx/dy 都非零
+            if dx != 0 and dy != 0:
+                # 拒绝对角移动 (4 方向系统), 仅吸附 + 不动
+                self._update_fov_visibility()
+                return self.get_state()
             self._try_discrete_move(float(dx), float(dy))
         elif action != 6:  # 移动
             cos_a = math.cos(s.car_angle)
@@ -602,19 +607,18 @@ class GameEngine:
 
     # ── FOV 可见性 (简易模式用) ───────────────────────────
 
-    # 严格识别参数: 必须近距离 (≤ √2 + ε) + 朝向 entity (±22.5°)
-    IDENT_MAX_DIST = 1.5         # 4 邻 = 1.0, 8 邻 = √2 ≈ 1.414
-    IDENT_HALF_ANGLE = math.pi / 8   # 22.5° (8-向系统的 1 个 tick)
+    # 严格识别 (新规则): 车必须在 entity 的 4-邻 (dist 恰好 = 1.0) +
+    # 车头精确正对 entity (4 个 90° 朝向之一, 跟 entity 方向夹角 ≈ 0)
+    IDENT_MAX_DIST = 1.05        # 紧贴 4-邻 (1.0 + 浮点松弛)
+    IDENT_HALF_ANGLE = math.pi / 32   # ~5.6° (要求精确正对, 不容忍偏角)
 
     def _update_fov_visibility(self):
-        """更新 FOV 可见性: 只有 "怼到 entity 旁边 + 朝向 entity" 才算识别.
+        """更新 FOV 可见性: 必须 "紧贴 entity 4-邻 + 车头正对" 才算识别.
 
-        新规则 (实车摄像头近距离对准):
-          1. 车与 entity 中心距离 ≤ 1.5 (4 邻或 8 邻紧贴)
-          2. 车头朝向跟 entity 方向夹角 ≤ ±22.5°
+        新规则 (4 方向系统, 真实车头 摄像头特别窄):
+          1. 车与 entity 中心距离 ≈ 1.0 (4-邻紧贴)
+          2. 车头朝向跟 entity 精确一致 (4 个朝向之一)
           3. 射线无遮挡
-
-        三个条件全部满足才标记为已识别.
         """
         s = self.state
 
@@ -629,23 +633,22 @@ class GameEngine:
                     s.seen_target_ids.add(i)
 
     def _can_identify_entity(self, tx: float, ty: float) -> bool:
-        """严格识别检查: 距离 + 朝向 + 视线不阻挡."""
+        """严格识别检查: 4-邻紧贴 + 精确正对 + 视线."""
         s = self.state
         dx = tx - s.car_x
         dy = ty - s.car_y
         dist = math.sqrt(dx * dx + dy * dy)
         if dist > self.IDENT_MAX_DIST:
             return False
-        if dist < 0.01:
-            return True  # 重叠 (理论上不会发生, 兜底)
+        if dist < 0.5:
+            return False   # 重叠/同格不允许 (4-邻一定是 dist≈1)
 
         angle_to = math.atan2(dy, dx)
         diff = angle_to - s.car_angle
-        diff = math.atan2(math.sin(diff), math.cos(diff))   # → [-π, π]
+        diff = math.atan2(math.sin(diff), math.cos(diff))
         if abs(diff) > self.IDENT_HALF_ANGLE:
             return False
 
-        # 视线遮挡 (1.5 距离内基本不可能, 兜底)
         return not self._ray_blocked(s.car_x, s.car_y, tx, ty, tx, ty)
 
     def _is_in_fov(self, tx: float, ty: float, half_fov: float,

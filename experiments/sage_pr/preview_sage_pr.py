@@ -111,7 +111,9 @@ def hybrid_v2_record(model, device, map_path: str, seed: int,
                      stuck_threshold: int = 1,
                      solver_time_limit: float = 30.0,
                      beam_width: int = 4, lookahead: int = 12,
-                     fully_observed: bool = True
+                     fully_observed: bool = True,
+                     enforce_sigma_lock: bool = False,
+                     pure_neural: bool = False,
                      ) -> Tuple[List[Tuple[int, str]], bool, dict]:
     """跑 hybrid_v2 inference 并录所有 discrete actions."""
     random.seed(seed)
@@ -137,7 +139,7 @@ def hybrid_v2_record(model, device, map_path: str, seed: int,
             info["won"] = True
             return action_log, True, info
 
-        if not using_solver and (no_progress >= stuck_threshold):
+        if not pure_neural and not using_solver and (no_progress >= stuck_threshold):
             with contextlib.redirect_stdout(io.StringIO()):
                 boxes = [(pos_to_grid(b.x, b.y), b.class_id) for b in s.boxes]
                 targets = {t.num_id: pos_to_grid(t.x, t.y) for t in s.targets}
@@ -162,7 +164,8 @@ def hybrid_v2_record(model, device, map_path: str, seed: int,
 
         result = rollout_search_step(model, device, eng, visited,
                                       beam_width=beam_width, lookahead=lookahead,
-                                      fully_observed=fully_observed)
+                                      fully_observed=fully_observed,
+                                      enforce_sigma_lock=enforce_sigma_lock)
         if result is None:
             no_progress += 1
             if no_progress >= stuck_threshold:
@@ -171,13 +174,43 @@ def hybrid_v2_record(model, device, map_path: str, seed: int,
         idx, cand = result
 
         bs = BeliefState.from_engine_state(eng.get_state(), fully_observed=fully_observed)
-        move = candidate_to_solver_move(cand, bs)
-        if move is None:
-            return action_log, False, info
 
         n_box_before = len(eng.get_state().boxes)
-        if not apply_solver_move_recorded(eng, move, action_log):
-            return action_log, False, info
+
+        if cand.type == "inspect":
+            # 录 inspect: 把 apply_inspect 的所有低层动作录下来
+            from experiments.sage_pr.belief_ida_solver import _heading_to_angle
+            from smartcar_sokoban.solver.explorer import compute_facing_actions
+            state = eng.get_state()
+            obstacles = set()
+            for b in state.boxes:
+                obstacles.add(pos_to_grid(b.x, b.y))
+            for bm in state.bombs:
+                obstacles.add(pos_to_grid(bm.x, bm.y))
+            car_grid = pos_to_grid(state.car_x, state.car_y)
+            target = (cand.viewpoint_col, cand.viewpoint_row)
+            eng.discrete_step(6)
+            action_log.append((6, "snap"))
+            if car_grid != target:
+                path = bfs_path(car_grid, target, state.grid, obstacles)
+                if path is None:
+                    return action_log, False, info
+                for pdx, pdy in path:
+                    a = direction_to_abs_action(pdx, pdy)
+                    eng.discrete_step(a)
+                    action_log.append((a, f"INSPECT walk ({pdx},{pdy})"))
+            state = eng.get_state()
+            rot_acts = compute_facing_actions(
+                state.car_angle, _heading_to_angle(cand.inspect_heading or 0))
+            for a in rot_acts:
+                eng.discrete_step(a)
+                action_log.append((a, f"INSPECT rotate -> heading {cand.inspect_heading}"))
+        else:
+            move = candidate_to_solver_move(cand, bs)
+            if move is None:
+                return action_log, False, info
+            if not apply_solver_move_recorded(eng, move, action_log):
+                return action_log, False, info
         info["n_macro_steps"] += 1
         info["n_model_steps"] += 1
         n_box_after = len(eng.get_state().boxes)
@@ -242,6 +275,11 @@ def main():
     parser.add_argument("--solver-time-limit", type=float, default=30.0)
     parser.add_argument("--beam", type=int, default=4)
     parser.add_argument("--lookahead", type=int, default=12)
+    parser.add_argument("--mode", choices=["v1", "v2"], default="v1",
+                        help="v1=fully_obs+solver fallback; v2=partial-obs+抑制场+纯神经")
+    parser.add_argument("--pure-neural", action="store_true",
+                        help="禁用 solver fallback, 纯模型决策")
+    parser.add_argument("--step-limit", type=int, default=60)
     parser.add_argument("--no-render", action="store_true",
                         help="只跑推理打印 trace, 不开 pygame")
     args = parser.parse_args()
@@ -276,9 +314,13 @@ def main():
         t0 = time.perf_counter()
         action_log, won, info = hybrid_v2_record(
             model, device, map_rel, seed,
+            step_limit=args.step_limit,
             stuck_threshold=args.stuck,
             solver_time_limit=args.solver_time_limit,
             beam_width=args.beam, lookahead=args.lookahead,
+            fully_observed=(args.mode == "v1"),
+            enforce_sigma_lock=(args.mode == "v2"),
+            pure_neural=args.pure_neural,
         )
         elapsed = time.perf_counter() - t0
         n_low = len(action_log)

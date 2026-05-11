@@ -1,8 +1,11 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
 
 # Virtual environments
 .venv/
@@ -11,18 +14,44 @@ env/
 
 # OS / editor
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
+*.swp
 
-# Local agent / temp outputs
+# Claude Code 协作工件
+.claude/
 .agent/
 
-# Runtime outputs
+# 训练输出 (大文件, 可重新生成)
 runs/
 tensorboard/
+wandb/
 
-# Scratch notes
-scripts/debug/context.txt
+# 模型 checkpoints (不入库, 训练后自己生成)
+*.pt
+*.pth
+*.tflite
 
-# Temporary generated maps
+# 数据集 (跑 build_dataset_v5 可重生成)
+*.npz
+
+# 第三方 SDK 代码 (OpenART 厂商示例)
+OpenART_Plus_Product-master/
+
+# 临时地图 / 生成中间产物
 assets/maps/**/_tmp*.txt
+assets/maps/_build_*.json
+
+# 长 trajectory log / debug 临时文件
+scripts/debug/context.txt
+*.log
+
+# 个人本地 notes / 一次性脚本输出
+NOTES.local.md
+*.local.md
+*.bak
+*.tmp
+
+# Ralph loop 运行时
+.claude/ralph-loop.local.md

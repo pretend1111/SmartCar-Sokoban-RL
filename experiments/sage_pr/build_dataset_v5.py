@@ -93,8 +93,9 @@ def _exact_fallback_episode(map_path: str, phase: int, seed: int,
     verify_info = {"n_label_miss": 0, "n_diverge": 0,
                    "first_diverge_step": None, "diverge_detail": None}
 
+    from smartcar_sokoban.solver.explorer_v3 import plan_exploration_v3
     with contextlib.redirect_stdout(io.StringIO()):
-        explore_actions = plan_exploration(eng)
+        explore_actions = plan_exploration_v3(eng, max_retries=15)
 
     state = eng.get_state()
     if not exploration_complete(state):

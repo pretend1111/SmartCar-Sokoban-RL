@@ -120,6 +120,28 @@ def make_phase_weights(phase: np.ndarray, target: Dict[int, float]) -> np.ndarra
 
 # ── 损失 ──────────────────────────────────────────────────
 
+def compute_losses_direct(model, X_grid, X_cand, u_global, mask, label):
+    """直接从张量计算损失 (跳过 DataLoader, 用 GPU-resident 数据)."""
+    score, value, deadlock, progress, info_gain = model(X_grid, X_cand, u_global, mask)
+    loss_policy = F.cross_entropy(score, label)
+    target_value = torch.ones_like(value)
+    loss_value = F.smooth_l1_loss(value, target_value)
+    selected_dl = deadlock.gather(1, label.unsqueeze(1)).squeeze(1)
+    loss_deadlock = F.binary_cross_entropy(selected_dl, torch.zeros_like(selected_dl))
+    selected_pg = progress.gather(1, label.unsqueeze(1)).squeeze(1)
+    target_pg = torch.ones_like(selected_pg) * 0.5
+    loss_progress = F.smooth_l1_loss(selected_pg, target_pg)
+    target_ig = X_cand[:, :, 108].detach()
+    loss_info = F.smooth_l1_loss(info_gain, target_ig)
+    total = (loss_policy + 0.3*loss_value + 0.2*loss_deadlock + 0.2*loss_progress + 0.1*loss_info)
+    with torch.no_grad():
+        pred = score.argmax(dim=-1)
+        acc = (pred == label).float().mean().item()
+    return total, {"policy": loss_policy.item(), "value": loss_value.item(),
+                    "deadlock": loss_deadlock.item(), "progress": loss_progress.item(),
+                    "info": loss_info.item(), "acc": acc}
+
+
 def compute_losses(model, batch, device):
     X_grid = batch["X_grid"].to(device)
     X_cand = batch["X_cand"].to(device)
@@ -184,6 +206,20 @@ def train(args):
     dataset = SagePrDataset(npz_paths)
     n = len(dataset)
 
+    # GPU-resident: 一次性搬到 GPU (慎用, ~9GB for X_cand); 推荐 cpu-tensor 模式
+    if args.gpu_resident and device.type == "cuda":
+        # 优先放 CPU pinned tensor + transposed grid, 训练时按 batch 异步搬 GPU
+        print("  preparing CPU pinned tensors (X_cand ~9GB stays on CPU)...")
+        X_grid_t = torch.from_numpy(dataset.X_grid.transpose(0, 3, 1, 2).copy()).float().pin_memory()
+        X_cand_t = torch.from_numpy(dataset.X_cand.copy()).float().pin_memory()
+        u_global_t = torch.from_numpy(dataset.u_global.copy()).float().pin_memory()
+        mask_t = torch.from_numpy(dataset.mask.copy()).float().pin_memory()
+        label_t = torch.from_numpy(dataset.label.astype(np.int64)).pin_memory()
+        phase_t = torch.from_numpy(dataset.phase.astype(np.int64))
+        print(f"  CPU tensors pinned, X_grid {X_grid_t.shape} X_cand {X_cand_t.shape}")
+    else:
+        X_grid_t = X_cand_t = u_global_t = mask_t = label_t = phase_t = None
+
     # 划分 train / val 80:20
     np.random.seed(42)
     idx = np.random.permutation(n)
@@ -207,14 +243,25 @@ def train(args):
     train_subset = torch.utils.data.Subset(dataset, train_idx.tolist())
     val_subset = torch.utils.data.Subset(dataset, val_idx.tolist())
 
-    train_loader = DataLoader(
-        train_subset, batch_size=args.batch_size, sampler=sampler,
-        collate_fn=collate, num_workers=0, pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_subset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate, num_workers=0, pin_memory=True,
-    )
+    if args.gpu_resident and X_grid_t is not None:
+        # CPU-pinned: 直接索引 CPU 张量, 用 .to(device, non_blocking=True) 异步搬
+        train_idx_t = torch.from_numpy(train_idx)
+        val_idx_t = torch.from_numpy(val_idx)
+        train_weights_t = torch.from_numpy(weights_full).float()
+        train_loader = None
+        val_loader = None
+    else:
+        train_loader = DataLoader(
+            train_subset, batch_size=args.batch_size, sampler=sampler,
+            collate_fn=collate, num_workers=args.num_workers,
+            pin_memory=True, persistent_workers=(args.num_workers > 0),
+        )
+        val_loader = DataLoader(
+            val_subset, batch_size=args.batch_size, shuffle=False,
+            collate_fn=collate, num_workers=args.num_workers,
+            pin_memory=True, persistent_workers=(args.num_workers > 0),
+        )
+        train_idx_t = val_idx_t = train_weights_t = None
 
     model = build_default_model().to(device)
     if args.init_ckpt:
@@ -225,7 +272,10 @@ def train(args):
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     n_epoch = args.epochs
-    n_iter_per_epoch = len(train_loader)
+    if args.gpu_resident and X_grid_t is not None:
+        n_iter_per_epoch = max(1, len(train_idx) // args.batch_size)
+    else:
+        n_iter_per_epoch = len(train_loader)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=n_epoch * n_iter_per_epoch, eta_min=args.lr * 0.1,
     )
@@ -249,18 +299,46 @@ def train(args):
         model.train()
         accum: Dict[str, float] = {}
         n_batches = 0
-        for batch in train_loader:
-            optimizer.zero_grad()
-            loss, metrics = compute_losses(model, batch, device)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
 
-            for k, v in metrics.items():
-                accum[k] = accum.get(k, 0.0) + v
-            accum["loss"] = accum.get("loss", 0.0) + loss.item()
-            n_batches += 1
+        if args.gpu_resident and X_grid_t is not None:
+            samples_per_epoch = len(train_idx_t)
+            # train_weights_t 已经是 train_idx 对齐的 (make_phase_weights(train_phases))
+            sampled_pos = torch.multinomial(
+                train_weights_t, samples_per_epoch, replacement=True
+            )
+            sampled = train_idx_t[sampled_pos]
+            for b_start in range(0, samples_per_epoch, args.batch_size):
+                b_end = min(b_start + args.batch_size, samples_per_epoch)
+                bi = sampled[b_start:b_end]
+                # pinned tensor index → async copy to GPU
+                xg = X_grid_t[bi].to(device, non_blocking=True)
+                xc = X_cand_t[bi].to(device, non_blocking=True)
+                ug = u_global_t[bi].to(device, non_blocking=True)
+                mk = mask_t[bi].to(device, non_blocking=True)
+                lb = label_t[bi].to(device, non_blocking=True)
+                optimizer.zero_grad()
+                loss, metrics = compute_losses_direct(model, xg, xc, ug, mk, lb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                for k, v in metrics.items():
+                    accum[k] = accum.get(k, 0.0) + v
+                accum["loss"] = accum.get("loss", 0.0) + loss.item()
+                n_batches += 1
+        else:
+            for batch in train_loader:
+                optimizer.zero_grad()
+                loss, metrics = compute_losses(model, batch, device)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+
+                for k, v in metrics.items():
+                    accum[k] = accum.get(k, 0.0) + v
+                accum["loss"] = accum.get("loss", 0.0) + loss.item()
+                n_batches += 1
 
         train_metrics = {k: v / max(n_batches, 1) for k, v in accum.items()}
 
@@ -271,24 +349,46 @@ def train(args):
         val_n = 0
         per_phase_acc: Dict[int, Tuple[int, int]] = {}
         with torch.no_grad():
-            for batch in val_loader:
-                loss, metrics = compute_losses(model, batch, device)
-                B = batch["label"].size(0)
-                val_acc_total += metrics["acc"] * B
-                val_loss_total += loss.item() * B
-                val_n += B
-                # per phase 准确率
-                pred = (model(batch["X_grid"].to(device),
-                              batch["X_cand"].to(device),
-                              batch["u_global"].to(device),
-                              batch["mask"].to(device))[0]).argmax(dim=-1).cpu().numpy()
-                lbl = batch["label"].numpy()
-                ph = batch["phase"].numpy()
-                for i in range(B):
-                    p = int(ph[i])
-                    correct = int(pred[i] == lbl[i])
-                    cnt, ok = per_phase_acc.get(p, (0, 0))
-                    per_phase_acc[p] = (cnt + 1, ok + correct)
+            if args.gpu_resident and X_grid_t is not None:
+                for b_start in range(0, len(val_idx_t), args.batch_size):
+                    bi = val_idx_t[b_start:b_start + args.batch_size]
+                    xg = X_grid_t[bi].to(device, non_blocking=True)
+                    xc = X_cand_t[bi].to(device, non_blocking=True)
+                    ug = u_global_t[bi].to(device, non_blocking=True)
+                    mk = mask_t[bi].to(device, non_blocking=True)
+                    lb = label_t[bi].to(device, non_blocking=True)
+                    ph_t = phase_t[bi]
+                    loss, metrics = compute_losses_direct(model, xg, xc, ug, mk, lb)
+                    B = lb.size(0)
+                    val_acc_total += metrics["acc"] * B
+                    val_loss_total += loss.item() * B
+                    val_n += B
+                    pred = model(xg, xc, ug, mk)[0].argmax(dim=-1).cpu().numpy()
+                    lbl = lb.cpu().numpy()
+                    ph = ph_t.cpu().numpy()
+                    for i in range(B):
+                        p = int(ph[i])
+                        correct = int(pred[i] == lbl[i])
+                        cnt, ok = per_phase_acc.get(p, (0, 0))
+                        per_phase_acc[p] = (cnt + 1, ok + correct)
+            else:
+                for batch in val_loader:
+                    loss, metrics = compute_losses(model, batch, device)
+                    B = batch["label"].size(0)
+                    val_acc_total += metrics["acc"] * B
+                    val_loss_total += loss.item() * B
+                    val_n += B
+                    pred = (model(batch["X_grid"].to(device),
+                                  batch["X_cand"].to(device),
+                                  batch["u_global"].to(device),
+                                  batch["mask"].to(device))[0]).argmax(dim=-1).cpu().numpy()
+                    lbl = batch["label"].numpy()
+                    ph = batch["phase"].numpy()
+                    for i in range(B):
+                        p = int(ph[i])
+                        correct = int(pred[i] == lbl[i])
+                        cnt, ok = per_phase_acc.get(p, (0, 0))
+                        per_phase_acc[p] = (cnt + 1, ok + correct)
 
         val_acc = val_acc_total / max(val_n, 1)
         val_loss = val_loss_total / max(val_n, 1)
@@ -330,6 +430,10 @@ def main():
                         help="path to initial ckpt (for fine-tune / DAgger).")
     parser.add_argument("--phase-dist", default="default", choices=["default", "hard"],
                         help="phase 采样权重: default=5/10/15/25/20/25, hard=3/5/10/20/32/30")
+    parser.add_argument("--num-workers", type=int, default=4,
+                        help="DataLoader workers (0 = main thread). >0 大幅减 GPU 等待.")
+    parser.add_argument("--gpu-resident", action="store_true",
+                        help="把整数据集一次性搬 GPU (~5GB), 跳过 DataLoader, GPU 满载.")
     args = parser.parse_args()
     train(args)
 

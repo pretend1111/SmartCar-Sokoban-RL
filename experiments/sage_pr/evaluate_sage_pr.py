@@ -71,11 +71,16 @@ def rollout_one(model, device, map_path: str, seed: int, *,
                 step_limit: int = 60,
                 top_k: int = 1,
                 fully_observed: bool = True,
-                enforce_sigma_lock: bool = False) -> Tuple[bool, int, float]:
-    """单图 deterministic rollout. top_k=1 = 纯 greedy; >1 = top-k 中找首个非重复状态.
+                enforce_sigma_lock: bool = False,
+                use_external_explorer: bool = False
+                ) -> Tuple[bool, int, float, int]:
+    """单图 deterministic rollout.
 
-    fully_observed=False + enforce_sigma_lock=True → V2 纯神经推理 (无外挂 plan_exploration).
-    支持 inspect 候选 (走 apply_inspect 而非 apply_solver_move).
+    返回 (won, n_macros, avg_inf_ms_per_call, n_lowlevel).
+
+    use_external_explorer=True: 跑 plan_exploration_v3 后再让模型接管 push 阶段
+        (V1 路线, fully_observed=True 自动激活).
+    fully_observed=False + enforce_sigma_lock=True → V2 纯神经推理.
     """
     import random
     from experiments.sage_pr.belief_ida_solver import apply_inspect
@@ -85,6 +90,21 @@ def rollout_one(model, device, map_path: str, seed: int, *,
     state = eng.reset(map_path)
     inf_total = 0.0
     inf_calls = 0
+    lowlevel_count = [0]   # closure box
+
+    # 包装 engine.discrete_step 统计 low-level
+    orig_step = eng.discrete_step
+    def counted_step(a):
+        lowlevel_count[0] += 1
+        return orig_step(a)
+    eng.discrete_step = counted_step
+
+    # 可选: 先跑外挂 plan_exploration_v3 (V1 路线)
+    if use_external_explorer:
+        from smartcar_sokoban.solver.explorer_v3 import plan_exploration_v3
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            plan_exploration_v3(eng, max_retries=15)
 
     visited_sigs = set()
     visited_sigs.add(_state_signature(eng.get_state()))
@@ -100,7 +120,7 @@ def rollout_one(model, device, map_path: str, seed: int, *,
     for step in range(step_limit):
         s = eng.get_state()
         if s.won:
-            return True, step, inf_total / max(inf_calls, 1)
+            return True, step, inf_total / max(inf_calls, 1), lowlevel_count[0]
 
         bs = BeliefState.from_engine_state(s, fully_observed=fully_observed)
         feat = compute_domain_features(bs)
@@ -108,7 +128,7 @@ def rollout_one(model, device, map_path: str, seed: int, *,
 
         legal = [c.legal for c in cands]
         if not any(legal):
-            return False, step, inf_total / max(inf_calls, 1)
+            return False, step, inf_total / max(inf_calls, 1), lowlevel_count[0]
 
         X_grid = build_grid_tensor(bs, feat).transpose(2, 0, 1)
         X_cand = encode_candidates(cands, bs, feat)
@@ -155,14 +175,14 @@ def rollout_one(model, device, map_path: str, seed: int, *,
                     chosen_idx = idx
                     break
         if chosen_idx is None:
-            return False, step, inf_total / max(inf_calls, 1)
+            return False, step, inf_total / max(inf_calls, 1), lowlevel_count[0]
 
         cand = cands[chosen_idx]
         if not _apply_cand(eng, cand, bs):
-            return False, step, inf_total / max(inf_calls, 1)
+            return False, step, inf_total / max(inf_calls, 1), lowlevel_count[0]
         visited_sigs.add(_state_signature(eng.get_state()))
 
-    return eng.get_state().won, step_limit, inf_total / max(inf_calls, 1)
+    return eng.get_state().won, step_limit, inf_total / max(inf_calls, 1), lowlevel_count[0]
 
 
 def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
@@ -171,6 +191,8 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
                    verified_seeds_map: Optional[Dict[str, List[int]]] = None,
                    fully_observed: bool = True,
                    enforce_sigma_lock: bool = False,
+                   use_external_explorer: bool = False,
+                   record_teacher: bool = False,
                    ) -> Dict[str, float]:
     maps = list_phase_maps(phase)
     if max_maps is not None:
@@ -179,22 +201,36 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
     n_won = 0
     total_steps = 0
     total_inf_ms = 0.0
+    total_lowlevel = 0
+    total_teacher_low = 0
+    teacher_won = 0
     for map_path in maps:
         if verified_seeds_map is not None and map_path in verified_seeds_map:
             ms = verified_seeds_map[map_path][:max(1, len(seeds_per_map))]
         else:
             ms = seeds_per_map
         for seed in ms:
-            won, steps, avg_inf = rollout_one(
+            won, steps, avg_inf, n_low = rollout_one(
                 model, device, map_path, seed,
                 step_limit=step_limit, top_k=top_k,
                 fully_observed=fully_observed,
-                enforce_sigma_lock=enforce_sigma_lock)
+                enforce_sigma_lock=enforce_sigma_lock,
+                use_external_explorer=use_external_explorer)
             n_total += 1
             if won:
                 n_won += 1
+                total_lowlevel += n_low
             total_steps += steps
             total_inf_ms += avg_inf * 1000
+
+            if record_teacher and won:
+                # 老师 (v1_v3) 在同图上的 trajectory
+                from experiments.sage_pr.preview_trajectory import _recorder_v1_v3
+                t_log, t_info = _recorder_v1_v3(map_path, seed)
+                if t_info.get("won"):
+                    total_teacher_low += len(t_log)
+                    teacher_won += 1
+
     return {
         "phase": phase,
         "n_total": n_total,
@@ -202,6 +238,11 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
         "win_rate": n_won / max(n_total, 1),
         "avg_steps": total_steps / max(n_total, 1),
         "avg_inf_ms": total_inf_ms / max(n_total, 1),
+        "avg_model_lowlevel": total_lowlevel / max(n_won, 1),
+        "avg_teacher_lowlevel": total_teacher_low / max(teacher_won, 1),
+        "ratio_model_teacher": (total_lowlevel / max(n_won, 1)) /
+                                max(1, total_teacher_low / max(teacher_won, 1)),
+        "teacher_won": teacher_won,
     }
 
 
@@ -220,6 +261,10 @@ def main():
                         help="rollout 时尝试 top-k 候选, 跳过会重访状态的 (避免循环). top_k=1 = 纯 greedy.")
     parser.add_argument("--mode", choices=["v1", "v2"], default="v1",
                         help="v1 = fully_observed (跑前需 plan_exploration); v2 = partial-obs + 抑制场 (纯神经)")
+    parser.add_argument("--external-explorer", action="store_true",
+                        help="V1 路线: 跑前先 plan_exploration_v3 把 entity 都识别")
+    parser.add_argument("--record-teacher", action="store_true",
+                        help="同时录 teacher (v1_v3) trajectory, 计算 model vs teacher 低层步数比")
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
 
@@ -253,7 +298,9 @@ def main():
                            max_maps=args.max_maps,
                            verified_seeds_map=verified_map,
                            fully_observed=fully_observed,
-                           enforce_sigma_lock=enforce_sigma_lock)
+                           enforce_sigma_lock=enforce_sigma_lock,
+                           use_external_explorer=args.external_explorer,
+                           record_teacher=args.record_teacher)
         elapsed = time.perf_counter() - t0
         print(f"  win_rate = {r['win_rate']*100:.2f}% "
               f"({r['n_won']}/{r['n_total']}); "
@@ -264,8 +311,14 @@ def main():
 
     print("\n=== Summary ===")
     for r in results:
-        print(f"phase {r['phase']}: win_rate={r['win_rate']*100:.2f}% "
-              f"({r['n_won']}/{r['n_total']}), avg_inf={r['avg_inf_ms']:.1f}ms")
+        line = (f"phase {r['phase']}: win_rate={r['win_rate']*100:.2f}% "
+                f"({r['n_won']}/{r['n_total']})")
+        if r.get("avg_model_lowlevel", 0) > 0:
+            line += (f" | model_low={r['avg_model_lowlevel']:.1f}"
+                     f" teacher_low={r['avg_teacher_lowlevel']:.1f}"
+                     f" ratio={r['ratio_model_teacher']:.2f}x")
+        line += f" | avg_inf={r['avg_inf_ms']:.1f}ms"
+        print(line)
 
     if args.out:
         with open(args.out, "w") as f:

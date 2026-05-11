@@ -72,12 +72,13 @@ def measure_progress(eng: GameEngine) -> float:
 
 
 def model_score(model, device, eng: GameEngine,
-                fully_observed: bool = True
+                fully_observed: bool = True,
+                enforce_sigma_lock: bool = False,
                 ) -> Tuple[Optional[List[Candidate]], Optional[np.ndarray]]:
     s = eng.get_state()
     bs = BeliefState.from_engine_state(s, fully_observed=fully_observed)
     feat = compute_domain_features(bs)
-    cands = generate_candidates(bs, feat)
+    cands = generate_candidates(bs, feat, enforce_sigma_lock=enforce_sigma_lock)
     if not any(c.legal for c in cands):
         return None, None
     X_grid = build_grid_tensor(bs, feat).transpose(2, 0, 1)
@@ -95,16 +96,28 @@ def model_score(model, device, eng: GameEngine,
     return cands, score_np
 
 
+def _apply_any(eng_target, cand: Candidate, bs_at_step: BeliefState) -> bool:
+    """Apply candidate (push or inspect) to engine."""
+    from experiments.sage_pr.belief_ida_solver import apply_inspect
+    if cand.type == "inspect":
+        return apply_inspect(eng_target, cand)
+    move = candidate_to_solver_move(cand, bs_at_step)
+    if move is None:
+        return False
+    return apply_solver_move(eng_target, move)
+
+
 def greedy_rollout_n(model, device, eng: GameEngine,
                      n: int, visited_sigs: set,
-                     fully_observed: bool = True) -> Tuple[GameEngine, bool]:
+                     fully_observed: bool = True,
+                     enforce_sigma_lock: bool = False) -> Tuple[GameEngine, bool]:
     """Greedy rollout n steps on a clone. Return (final_eng, won)."""
     eng = copy.deepcopy(eng)
     for _ in range(n):
         s = eng.get_state()
         if s.won:
             return eng, True
-        cands, score = model_score(model, device, eng, fully_observed)
+        cands, score = model_score(model, device, eng, fully_observed, enforce_sigma_lock)
         if cands is None:
             return eng, False
         order = np.argsort(-score)
@@ -115,11 +128,8 @@ def greedy_rollout_n(model, device, eng: GameEngine,
             if not cand.legal:
                 continue
             bs_now = BeliefState.from_engine_state(eng.get_state(), fully_observed=fully_observed)
-            move = candidate_to_solver_move(cand, bs_now)
-            if move is None:
-                continue
             eng_clone = copy.deepcopy(eng)
-            if not apply_solver_move(eng_clone, move):
+            if not _apply_any(eng_clone, cand, bs_now):
                 continue
             sig = _state_signature(eng_clone.get_state())
             if sig in visited_sigs:
@@ -131,8 +141,7 @@ def greedy_rollout_n(model, device, eng: GameEngine,
         if chosen is None:
             return eng, False
         bs_now = BeliefState.from_engine_state(eng.get_state(), fully_observed=fully_observed)
-        move = candidate_to_solver_move(cands[chosen], bs_now)
-        if not move or not apply_solver_move(eng, move):
+        if not _apply_any(eng, cands[chosen], bs_now):
             return eng, False
     return eng, eng.get_state().won
 
@@ -140,10 +149,11 @@ def greedy_rollout_n(model, device, eng: GameEngine,
 def rollout_search_step(model, device, eng: GameEngine,
                          visited_sigs: set,
                          beam_width: int = 4, lookahead: int = 4,
-                         fully_observed: bool = True
+                         fully_observed: bool = True,
+                         enforce_sigma_lock: bool = False
                          ) -> Optional[Tuple[int, Candidate]]:
     """对 top-B 候选, 模拟 lookahead 步 greedy rollout, 选进度最大的."""
-    cands, score = model_score(model, device, eng, fully_observed)
+    cands, score = model_score(model, device, eng, fully_observed, enforce_sigma_lock)
     if cands is None:
         return None
     legal_idx = [i for i, c in enumerate(cands) if c.legal]
@@ -160,20 +170,16 @@ def rollout_search_step(model, device, eng: GameEngine,
     for idx in top_b:
         cand = cands[idx]
         bs_now = BeliefState.from_engine_state(eng.get_state(), fully_observed=fully_observed)
-        move = candidate_to_solver_move(cand, bs_now)
-        if move is None:
-            continue
         eng_clone = copy.deepcopy(eng)
-        if not apply_solver_move(eng_clone, move):
+        if not _apply_any(eng_clone, cand, bs_now):
             continue
-        # rollout 后评估进度
         eng_after_rollout, won = greedy_rollout_n(
-            model, device, eng_clone, lookahead, visited_sigs, fully_observed
+            model, device, eng_clone, lookahead, visited_sigs,
+            fully_observed, enforce_sigma_lock,
         )
         progress = measure_progress(eng_after_rollout)
         if won:
             progress += 1000.0  # huge bonus
-        # 加上 model 自身 score 作 tiebreaker
         score_total = progress + 0.1 * score[idx]
         if score_total > best_score:
             best_score = score_total
@@ -187,7 +193,8 @@ def rollout_search_step(model, device, eng: GameEngine,
 def rollout_search_episode(model, device, map_path: str, seed: int,
                             *, step_limit: int = 60,
                             beam_width: int = 3, lookahead: int = 4,
-                            fully_observed: bool = True
+                            fully_observed: bool = True,
+                            enforce_sigma_lock: bool = False,
                             ) -> Tuple[bool, int, float]:
     import random
     random.seed(seed)
@@ -208,7 +215,8 @@ def rollout_search_episode(model, device, map_path: str, seed: int,
         result = rollout_search_step(model, device, eng, visited,
                                        beam_width=beam_width,
                                        lookahead=lookahead,
-                                       fully_observed=fully_observed)
+                                       fully_observed=fully_observed,
+                                       enforce_sigma_lock=enforce_sigma_lock)
         inf_total += time.perf_counter() - t0
         inf_calls += 1
 
@@ -217,8 +225,7 @@ def rollout_search_episode(model, device, map_path: str, seed: int,
         idx, cand = result
 
         bs_now = BeliefState.from_engine_state(eng.get_state(), fully_observed=fully_observed)
-        move = candidate_to_solver_move(cand, bs_now)
-        if not move or not apply_solver_move(eng, move):
+        if not _apply_any(eng, cand, bs_now):
             return False, step, inf_total / max(inf_calls, 1)
         visited.add(_state_signature(eng.get_state()))
 
@@ -230,6 +237,8 @@ def evaluate_phase_rollout(model, device, phase: int, seeds_per_map: List[int],
                             beam_width: int = 3, lookahead: int = 4,
                             max_maps: Optional[int] = None,
                             verified_seeds_map: Optional[Dict[str, List[int]]] = None,
+                            fully_observed: bool = True,
+                            enforce_sigma_lock: bool = False,
                             ) -> Dict:
     maps = list_phase_maps(phase)
     if max_maps is not None:
@@ -248,6 +257,8 @@ def evaluate_phase_rollout(model, device, phase: int, seeds_per_map: List[int],
                 model, device, map_path, seed,
                 step_limit=step_limit,
                 beam_width=beam_width, lookahead=lookahead,
+                fully_observed=fully_observed,
+                enforce_sigma_lock=enforce_sigma_lock,
             )
             n_total += 1
             if won:
@@ -274,8 +285,12 @@ def main():
     parser.add_argument("--use-verified-seeds", action="store_true")
     parser.add_argument("--beam", type=int, default=3)
     parser.add_argument("--lookahead", type=int, default=4)
+    parser.add_argument("--mode", choices=["v1", "v2"], default="v1",
+                        help="v1=fully_observed; v2=partial-obs + enforce_sigma_lock")
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
+    fully_observed = (args.mode == "v1")
+    enforce_sigma_lock = (args.mode == "v2")
 
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -303,6 +318,8 @@ def main():
             beam_width=args.beam, lookahead=args.lookahead,
             max_maps=args.max_maps,
             verified_seeds_map=verified_map,
+            fully_observed=fully_observed,
+            enforce_sigma_lock=enforce_sigma_lock,
         )
         elapsed = time.perf_counter() - t0
         print(f"  win_rate = {r['win_rate']*100:.2f}% ({r['n_won']}/{r['n_total']}); "

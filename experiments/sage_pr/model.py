@@ -332,3 +332,20 @@ def build_default_model() -> SAGEPolicyRanker:
         c_dim=96,
         value_hidden=32,
     )
+
+
+def build_large_model() -> SAGEPolicyRanker:
+    """更大版本 ~250K params, 用于 phase 4/5/6 hard cases."""
+    return SAGEPolicyRanker(
+        grid_in_ch=30,
+        grid_mid=48,
+        grid_out=72,
+        z_grid=128,
+        cand_in_dim=128,
+        cand_hidden=128,
+        e_dim=128,
+        u_dim=16,
+        fusion_hidden=192,
+        c_dim=128,
+        value_hidden=48,
+    )

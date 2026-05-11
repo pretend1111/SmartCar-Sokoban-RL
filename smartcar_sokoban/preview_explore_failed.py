@@ -39,6 +39,7 @@ from smartcar_sokoban.engine import GameEngine, GameState
 from smartcar_sokoban.paths import PROJECT_ROOT
 from smartcar_sokoban.renderer import Renderer
 from smartcar_sokoban.solver.explorer import plan_exploration, exploration_complete
+from smartcar_sokoban.solver.explorer_v2 import plan_exploration_v2
 from smartcar_sokoban.solver.pathfinder import pos_to_grid
 
 
@@ -64,6 +65,8 @@ def main():
     parser.add_argument('--list', type=str,
                         default='runs/sage_pr/explore_failed_maps.json',
                         help='失败图清单 JSON')
+    parser.add_argument('--use-v2', action='store_true',
+                        help='用 plan_exploration_v2 (带推开障碍补丁) 而非原始 plan_exploration')
     parser.add_argument('--out', type=str,
                         default='runs/sage_pr/explore_decisions.json',
                         help='保存 keep/delete 决策的 JSON')
@@ -116,8 +119,11 @@ def main():
         random.seed(item['seed'])
         engine.reset(item['map'])
         with redirect_stdout(io.StringIO()):
-            actions = list(plan_exploration(engine))
-        # 重置用于回放 (plan_exploration 会真的走车, 我们要 visualize 过程)
+            if args.use_v2:
+                actions = list(plan_exploration_v2(engine, max_retries=15))
+            else:
+                actions = list(plan_exploration(engine))
+        # 重置用于回放
         random.seed(item['seed'])
         engine.reset(item['map'])
         state = engine.get_state()

@@ -159,17 +159,17 @@ def has_line_of_sight(from_col: int, from_row: int,
 def _compute_face_cost(nc: int, nr: int,
                        ec: int, er: int,
                        current_angle: float) -> Tuple[float, int]:
-    """计算从 (nc,nr) 面向 (ec,er) 所需的量化角度和旋转步数."""
+    """计算从 (nc,nr) 面向 (ec,er) 所需的量化角度和旋转步数 (4 方向系统)."""
     angle = math.atan2((er + 0.5) - (nr + 0.5),
                        (ec + 0.5) - (nc + 0.5))
-    angle_q = round(angle / (math.pi / 4)) * (math.pi / 4)
+    angle_q = round(angle / (math.pi / 2)) * (math.pi / 2)
     angle_q = math.atan2(math.sin(angle_q), math.cos(angle_q))
 
     angle_diff = angle_q - current_angle
     angle_diff = math.atan2(math.sin(angle_diff),
                             math.cos(angle_diff))
-    rot_steps = abs(round(angle_diff / (math.pi / 4)))
-    rot_steps = min(rot_steps, 8 - rot_steps)
+    rot_steps = abs(round(angle_diff / (math.pi / 2)))
+    rot_steps = min(rot_steps, 4 - rot_steps)
     return angle_q, rot_steps
 
 
@@ -193,11 +193,10 @@ def find_observation_point(car_grid: Tuple[int, int],
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
 
-    # 8 邻紧贴格子 (上下左右 + 对角), 且必须跟 entity 有视线 (避开墙角遮挡)
-    DIRS_8 = [(1, 0), (-1, 0), (0, 1), (0, -1),
-              (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    # 4-邻紧贴格子 (上下左右), 必须跟 entity 有视线 (避开墙角遮挡)
+    DIRS_VP = [(1, 0), (-1, 0), (0, 1), (0, -1)]
     adjacent: Set[Tuple[int, int]] = set()
-    for dc, dr in DIRS_8:
+    for dc, dr in DIRS_VP:
         nc, nr = ec + dc, er + dr
         if not (0 <= nc < cols and 0 <= nr < rows):
             continue
@@ -261,21 +260,20 @@ def direction_to_action(dx: int, dy: int) -> int:
 
 def compute_facing_actions(current_angle: float,
                            target_angle: float) -> List[int]:
-    """最短旋转路径: current → target."""
+    """最短旋转路径: current → target (4 方向系统, 每步 ±90°)."""
     def norm(a):
         return math.atan2(math.sin(a), math.cos(a))
 
     diff = norm(target_angle - current_angle)
-    steps = round(diff / (math.pi / 4))
+    # 4 方向: 每步 π/2. steps ∈ {-2, -1, 0, 1, 2}
+    steps = round(diff / (math.pi / 2))
 
-    if steps > 4:
-        return [4] * (8 - steps)
-    elif steps > 0:
-        return [5] * steps
-    elif steps < -4:
-        return [5] * (8 + steps)
-    elif steps < 0:
-        return [4] * (-steps)
+    if steps == 2 or steps == -2:
+        return [5, 5]   # 180° = 2 个右转
+    elif steps == 1:
+        return [5]
+    elif steps == -1:
+        return [4]
     return []
 
 
