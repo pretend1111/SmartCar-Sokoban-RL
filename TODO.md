@@ -40,11 +40,12 @@
 - [x] `build_model_from_ckpt()` 加 `detect_model_arch()` 自动识别 push_only / full
 - **完成判定**: build_push_only_model().num_parameters() = 102,530; 旧 v3_large9 ckpt 仍能加载 (向后兼容)
 
-### Step 5. 训练 loss 瘦身 (`experiments/sage_pr/train_sage_pr.py`)
-- [ ] 删除 L_info / L_progress 计算和加权项 (loss 只剩 L_policy + L_value)
-- [ ] 数据加载时把旧 npz 的 X_grid / X_cand 切片到新维度 (兼容老数据格式不重新生成)
-- [ ] `--arch push_only` 默认: 用 `build_push_only_model()`
-- **完成判定**: 训 1 epoch 跑通 no error, val_acc 出数字
+### Step 5. 训练 loss 瘦身 (`experiments/sage_pr/train_sage_pr.py`) ✅
+- [x] compute_losses 删 L_info/L_progress/L_deadlock, 只剩 L_policy + 0.3·L_value
+- [x] _model_forward_score_value 适配 push_only (2 输出) 和 full (5 输出)
+- [x] `SagePrDataset(push_only=True)` 加载时切片 X_grid 30→27, X_cand 128→118, u_global 16→12
+- [x] `--arch push_only` 默认 flag; ckpt 保存 `model_arch` 字段
+- **完成判定**: smoke test 1 epoch (phase 1+2, 22k samples) val_acc=0.760, model 102K params
 
 ### Step 6. 数据集复用 (不重生)
 - [ ] 用现有 `runs/sage_pr/full_v5_v3/phase{1..6}_exact.npz` (已经 post-explorer)

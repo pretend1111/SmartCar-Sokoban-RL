@@ -37,14 +37,26 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from experiments.sage_pr.model import build_default_model, build_large_model
+from experiments.sage_pr.model import (
+    build_default_model, build_large_model,
+    build_push_only_model, build_push_only_large,
+)
+from smartcar_sokoban.symbolic.cand_features import slice_push_only_cand
+from smartcar_sokoban.symbolic.grid_tensor import (
+    slice_push_only_grid, slice_push_only_global,
+)
 
 
 # ── 数据集 ────────────────────────────────────────────────
 
 class SagePrDataset(Dataset):
-    """从多个 npz 加载样本, 合并 + phase index."""
-    def __init__(self, npz_paths: List[str]):
+    """从多个 npz 加载样本, 合并 + phase index.
+
+    Args:
+        push_only: True 时把 X_grid 30→27ch, X_cand 128→118, u_global 16→12, 跟
+            push_only model 输入对齐 (新架构默认).
+    """
+    def __init__(self, npz_paths: List[str], push_only: bool = True):
         self.X_grid: List[np.ndarray] = []
         self.X_cand: List[np.ndarray] = []
         self.u_global: List[np.ndarray] = []
@@ -71,6 +83,13 @@ class SagePrDataset(Dataset):
         self.label = np.concatenate(self.label, axis=0)
         self.phase = np.concatenate(self.phase, axis=0)
         self.source = np.concatenate(self.source, axis=0)
+
+        if push_only:
+            print(f"  slice push_only: X_grid {self.X_grid.shape[-1]}→27ch, "
+                  f"X_cand {self.X_cand.shape[-1]}→118, u_global {self.u_global.shape[-1]}→12")
+            self.X_grid = slice_push_only_grid(self.X_grid)
+            self.X_cand = slice_push_only_cand(self.X_cand)
+            self.u_global = slice_push_only_global(self.u_global)
         print(f"  total: {len(self.label)} samples; phases unique = "
               f"{np.unique(self.phase).tolist()}")
 
@@ -120,26 +139,25 @@ def make_phase_weights(phase: np.ndarray, target: Dict[int, float]) -> np.ndarra
 
 # ── 损失 ──────────────────────────────────────────────────
 
+def _model_forward_score_value(model, X_grid, X_cand, u_global, mask):
+    """适配 push_only (2 输出) 和 full (5 输出) 两种模型."""
+    out = model(X_grid, X_cand, u_global, mask)
+    if len(out) == 2:
+        return out[0], out[1]  # push_only
+    return out[0], out[1]  # full — 后 3 个 aux 弃用
+
+
 def compute_losses_direct(model, X_grid, X_cand, u_global, mask, label):
-    """直接从张量计算损失 (跳过 DataLoader, 用 GPU-resident 数据)."""
-    score, value, deadlock, progress, info_gain = model(X_grid, X_cand, u_global, mask)
+    """直接从张量计算损失. 新架构仅 L_policy + L_value."""
+    score, value = _model_forward_score_value(model, X_grid, X_cand, u_global, mask)
     loss_policy = F.cross_entropy(score, label)
     target_value = torch.ones_like(value)
     loss_value = F.smooth_l1_loss(value, target_value)
-    selected_dl = deadlock.gather(1, label.unsqueeze(1)).squeeze(1)
-    loss_deadlock = F.binary_cross_entropy(selected_dl, torch.zeros_like(selected_dl))
-    selected_pg = progress.gather(1, label.unsqueeze(1)).squeeze(1)
-    target_pg = torch.ones_like(selected_pg) * 0.5
-    loss_progress = F.smooth_l1_loss(selected_pg, target_pg)
-    target_ig = X_cand[:, :, 108].detach()
-    loss_info = F.smooth_l1_loss(info_gain, target_ig)
-    total = (loss_policy + 0.3*loss_value + 0.2*loss_deadlock + 0.2*loss_progress + 0.1*loss_info)
+    total = loss_policy + 0.3 * loss_value
     with torch.no_grad():
         pred = score.argmax(dim=-1)
         acc = (pred == label).float().mean().item()
-    return total, {"policy": loss_policy.item(), "value": loss_value.item(),
-                    "deadlock": loss_deadlock.item(), "progress": loss_progress.item(),
-                    "info": loss_info.item(), "acc": acc}
+    return total, {"policy": loss_policy.item(), "value": loss_value.item(), "acc": acc}
 
 
 def compute_losses(model, batch, device):
@@ -149,47 +167,15 @@ def compute_losses(model, batch, device):
     mask = batch["mask"].to(device)
     label = batch["label"].to(device)
 
-    score, value, deadlock, progress, info_gain = model(X_grid, X_cand, u_global, mask)
-    # score: [B, 64], label: [B]
+    score, value = _model_forward_score_value(model, X_grid, X_cand, u_global, mask)
     loss_policy = F.cross_entropy(score, label)
-
-    # value head 监督: 用 1.0 (合法专家行动 = 高价值) 作为弱监督
     target_value = torch.ones_like(value)
     loss_value = F.smooth_l1_loss(value, target_value)
-
-    # Deadlock head 自监督: 老师选的候选不应是死锁 -> 0
-    dl_label = torch.zeros_like(deadlock)
-    selected_dl = deadlock.gather(1, label.unsqueeze(1)).squeeze(1)
-    loss_deadlock = F.binary_cross_entropy(selected_dl, torch.zeros_like(selected_dl))
-
-    # Progress head 监督: 老师选的应该让进度增加 (1 = 推得近) → 弱信号
-    selected_pg = progress.gather(1, label.unsqueeze(1)).squeeze(1)
-    target_pg = torch.ones_like(selected_pg) * 0.5
-    loss_progress = F.smooth_l1_loss(selected_pg, target_pg)
-
-    # Info-gain head 监督: GT = X_cand[:, :, 108] (cand_features 段 [108]: viewpoint
-    # 的 info_gain_heatmap, 非 inspect 候选自然为 0). per-cand smooth-L1.
-    target_ig = X_cand[:, :, 108].detach()                     # [B, 64]
-    loss_info = F.smooth_l1_loss(info_gain, target_ig)
-
-    total = (loss_policy
-             + 0.3 * loss_value
-             + 0.2 * loss_deadlock
-             + 0.2 * loss_progress
-             + 0.1 * loss_info)
-
-    # 准确率 (top-1)
+    total = loss_policy + 0.3 * loss_value
     with torch.no_grad():
         pred = score.argmax(dim=-1)
         acc = (pred == label).float().mean().item()
-    return total, {
-        "policy": loss_policy.item(),
-        "value": loss_value.item(),
-        "deadlock": loss_deadlock.item(),
-        "progress": loss_progress.item(),
-        "info": loss_info.item(),
-        "acc": acc,
-    }
+    return total, {"policy": loss_policy.item(), "value": loss_value.item(), "acc": acc}
 
 
 # ── 训练循环 ──────────────────────────────────────────────
@@ -203,7 +189,7 @@ def train(args):
         if not os.path.isabs(p):
             p = os.path.join(ROOT, p)
         npz_paths.append(p)
-    dataset = SagePrDataset(npz_paths)
+    dataset = SagePrDataset(npz_paths, push_only=(args.arch == "push_only"))
     n = len(dataset)
 
     # GPU-resident: 一次性搬到 GPU (慎用, ~9GB for X_cand); 推荐 cpu-tensor 模式
@@ -263,7 +249,10 @@ def train(args):
         )
         train_idx_t = val_idx_t = train_weights_t = None
 
-    model_builder = build_large_model if args.model == "large" else build_default_model
+    if args.arch == "push_only":
+        model_builder = build_push_only_large if args.model == "large" else build_push_only_model
+    else:
+        model_builder = build_large_model if args.model == "large" else build_default_model
     model = model_builder().to(device)
     if args.init_ckpt:
         ck = torch.load(args.init_ckpt, map_location=device)
@@ -413,6 +402,7 @@ def train(args):
                 "val_acc": val_acc,
                 "args": vars(args),
                 "model_size": args.model,
+                "model_arch": args.arch,
             }, ckpt_path)
             log(f"  saved best (val_acc={val_acc:.3f}) → {ckpt_path}")
 
@@ -438,6 +428,9 @@ def main():
                         help="把整数据集一次性搬 GPU (~5GB), 跳过 DataLoader, GPU 满载.")
     parser.add_argument("--model", default="default", choices=["default", "large"],
                         help="model size: default=105K, large=194K.")
+    parser.add_argument("--arch", default="push_only", choices=["push_only", "full"],
+                        help="push_only (新架构, 默认, 配 explorer 算法 + NN 推箱); "
+                             "full (旧架构, 含 inspect / info_gain 等 aux heads).")
     args = parser.parse_args()
     train(args)
 
