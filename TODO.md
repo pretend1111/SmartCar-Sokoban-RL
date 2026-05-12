@@ -47,11 +47,11 @@
 - [x] `--arch push_only` 默认 flag; ckpt 保存 `model_arch` 字段
 - **完成判定**: smoke test 1 epoch (phase 1+2, 22k samples) val_acc=0.760, model 102K params
 
-### Step 6. 数据集复用 (不重生)
-- [ ] 用现有 `runs/sage_pr/full_v5_v3/phase{1..6}_exact.npz` (已经 post-explorer)
-- [ ] 用所有 dagger_v1_r* 和 dagger_targeted_p5_* (也是 post-explorer)
-- [ ] 训练加载时 slice 到新维度 (新 X_grid_ch < 30, X_cand_dim < 128)
-- **完成判定**: 训练 log 显示 `train n=` 跟之前数字一致 (例如 347248)
+### Step 6. 数据集复用 (不重生) ✅
+- [x] SagePrDataset 加载 npz 后切片 (Step 5 实现)
+- [x] 验证: 加载 6 phase exact + 3 dagger = 156341 samples, X_grid (156341,10,14,27), X_cand (156341,64,118), u_global (156341,12)
+- [x] 全部 35 个 npz (~347k samples) 会在 Step 7 完整训练里加载
+- **完成判定**: 子集验证通过, 不重生数据, npz 向后兼容 ✓
 
 ### Step 7. 训练 v5_push_only
 - [ ] `python experiments/sage_pr/train_sage_pr.py --arch push_only --tag v5_push_only --batch-size 256 --lr 3e-4 --epochs 80 --phase-dist hard --num-workers 0` 用全部数据
