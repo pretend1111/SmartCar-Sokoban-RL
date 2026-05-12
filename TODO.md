@@ -58,22 +58,20 @@
 - [x] 41 min on RTX 5060 Ti, CPU bound (100%) / GPU 49%
 - **完成判定**: val_acc=0.972 (best ep80), p1=98.9/p2=94.6/p3=87.8/p4=95.4/p5=98.7/p6=97.6
 
-### Step 8. 全量 eval 加 --external-explorer 🏃 跑中
+### Step 8. 全量 eval 加 --external-explorer ✅
 - [x] eval 代码适配 push_only model (2-output forward + 输入切片)
-- [x] 6 phase 并行 eval 启动 (.agent/sage_pr/runs/v5_push_only/eval_full/)
-- [ ] 等待完成 (~3-4 hr, 6-way GPU 共享)
-- **完成判定**: 6 phase 全部 ≥ 95% (期待 v3_large9 baseline 中 p1=100/p2=99.6/p3=98/p4=98.9/p5=97.8/p6=98.8 — v5 应至少匹配)
+- [x] 6 phase 并行 eval (6-way GPU 共享, ~2.4 hr 总耗时)
+- **完成判定全部满足**: p1=100% / p2=99.60% / p3=98.91% / p4=99.60% / p5=98.71% / p6=99.31% — 全部 ≥ 95% ✓
+- **横向对比**: v5_push_only 全面超 v3_large9 (旧架构 no explorer + god-view cheat)
 
-### Step 9. 如有 phase < 95% → targeted DAgger
-- [ ] 用 `experiments/sage_pr/dagger_targeted.py` 对 fail 图集中 oversample
-- [ ] 重训 v5_push_only_dag1 加新 DAgger 数据
-- [ ] 重 eval (Step 8)
-- **完成判定**: 全 phase ≥ 95%
+### Step 9. 如有 phase < 95% → targeted DAgger ⏭ 跳过
+- 全部 phase 已 ≥ 95%, 无需 DAgger.
 
-### Step 10. 写 README + push GitHub
-- [ ] 把新架构写到 README §3 当前状态
-- [ ] §10 遗留问题里把旧 (V1 fully-observed leakage) 的 §10.1 改成"已解决, 当前架构 = 传统 explorer + NN push"
-- [ ] commit + push
+### Step 10. 写 README + push GitHub ✅
+- [x] 把新架构写到 README §3 当前状态 (含 v5_push_only 数字 + 部署架构图)
+- [x] §10 fully-observed leakage 改成已解决
+- [x] §11 主模型路径切到 v5_push_only/best.pt
+- [x] commit + push
 
 ---
 
