@@ -53,10 +53,10 @@
 - [x] 全部 35 个 npz (~347k samples) 会在 Step 7 完整训练里加载
 - **完成判定**: 子集验证通过, 不重生数据, npz 向后兼容 ✓
 
-### Step 7. 训练 v5_push_only
-- [ ] `python experiments/sage_pr/train_sage_pr.py --arch push_only --tag v5_push_only --batch-size 256 --lr 3e-4 --epochs 80 --phase-dist hard --num-workers 0` 用全部数据
-- [ ] 大约 25-40 min 在 RTX 5060 Ti
-- **完成判定**: train.log 显示 val_acc ≥ 0.95
+### Step 7. 训练 v5_push_only ✅
+- [x] 80 epoch large push_only model, 347k samples (6 base + 23 DAgger + 5 targeted)
+- [x] 41 min on RTX 5060 Ti, CPU bound (100%) / GPU 49%
+- **完成判定**: val_acc=0.972 (best ep80), p1=98.9/p2=94.6/p3=87.8/p4=95.4/p5=98.7/p6=97.6
 
 ### Step 8. 全量 eval 加 --external-explorer
 - [ ] `rollout_search_eval.py --ckpt v5_push_only/best.pt --phases 1-6 --use-verified-seeds --max-maps 1011 --beam 8 --lookahead 25 --mode v1 --external-explorer`
