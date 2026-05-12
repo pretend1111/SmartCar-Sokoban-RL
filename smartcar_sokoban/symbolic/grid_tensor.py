@@ -38,6 +38,28 @@ GRID_TENSOR_CHANNELS = 30
 GLOBAL_DIM = 16
 
 
+# ── push_only 新架构 (post-explorer, 板上 BFS 算法负责识别) ──
+# 退化通道 (post-explorer 后永远恒定): 13 (box_known_mask=全1), 15 (target_known_mask=全1), 29 (info_gain=全0)
+# 退化全局标量: [4] n_unidentified_boxes=0, [5] n_unidentified_targets=0, [6] fully_identified=1, [9] FOV ratio=1
+_DROP_GRID_CHANNELS = (13, 15, 29)
+_KEEP_GRID_CHANNELS = tuple(i for i in range(GRID_TENSOR_CHANNELS) if i not in _DROP_GRID_CHANNELS)
+_DROP_GLOBAL_INDICES = (4, 5, 6, 9)
+_KEEP_GLOBAL_INDICES = tuple(i for i in range(GLOBAL_DIM) if i not in _DROP_GLOBAL_INDICES)
+
+GRID_TENSOR_CHANNELS_PUSH = len(_KEEP_GRID_CHANNELS)   # 27
+GLOBAL_DIM_PUSH = len(_KEEP_GLOBAL_INDICES)             # 12
+
+
+def slice_push_only_grid(X_grid: np.ndarray) -> np.ndarray:
+    """[..., H, W, 30] -> [..., H, W, 27], drop ch 13/15/29 (退化通道)."""
+    return X_grid[..., list(_KEEP_GRID_CHANNELS)]
+
+
+def slice_push_only_global(u_global: np.ndarray) -> np.ndarray:
+    """[..., 16] -> [..., 12], drop unidentified / fully_obs / FOV ratio 退化标量."""
+    return u_global[..., list(_KEEP_GLOBAL_INDICES)]
+
+
 def _crop_playable(arr: np.ndarray) -> np.ndarray:
     """[GRID_ROWS, GRID_COLS, ...] -> [PLAYABLE_ROWS, PLAYABLE_COLS, ...]."""
     return arr[

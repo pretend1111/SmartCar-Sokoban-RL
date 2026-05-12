@@ -25,12 +25,12 @@
 - [x] 加常量 `CAND_FEATURE_DIM_PUSH = 118`
 - **完成判定**: tests/test_cand_features.py 加 2 个 push_only 切片 test, 10 项全过 (0.18s)
 
-### Step 3. 网格特征瘦身 (`smartcar_sokoban/symbolic/grid_tensor.py`)
-- [ ] 删除 ch29 `info_gain_heatmap`
-- [ ] 删除 ch13 / 15 `box_known_mask` / `target_known_mask` (post-explorer 永远全 1, 信息量 0)
-- [ ] 删除 ch17-21 `box_id_inferred` 中 partial-obs 用的退化通道 (按需保留 push 距离差分相关)
-- [ ] 新 GRID_TENSOR_CHANNELS_PUSH = <数 24-26>
-- **完成判定**: 单测 grid_tensor 输出新 channel 数
+### Step 3. 网格特征瘦身 (`smartcar_sokoban/symbolic/grid_tensor.py`) ✅
+- [x] 加 `slice_push_only_grid()` 切掉 ch13 (box_known_mask) / ch15 (target_known_mask) / ch29 (info_gain_heatmap)
+- [x] 加 `slice_push_only_global()` 切掉 u_global [4,5,6,9] (unidentified / fully_obs / FOV ratio)
+- [x] ch17-21 box_id_inferred 保留 (push 距离归一化, 推箱必需)
+- [x] `GRID_TENSOR_CHANNELS_PUSH = 27`, `GLOBAL_DIM_PUSH = 12`
+- **完成判定**: tests/test_grid_tensor.py 新增 test_push_only_slice, 9 项全过
 
 ### Step 4. 模型架构瘦身 (`experiments/sage_pr/model.py`)
 - [ ] 删 `info_gain_head` (`heads.info_gain_fc`)

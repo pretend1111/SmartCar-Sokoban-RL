@@ -97,5 +97,22 @@ def test_global_shape():
     assert u.dtype == np.float32
 
 
+def test_push_only_slice():
+    from smartcar_sokoban.symbolic.grid_tensor import (
+        slice_push_only_grid, slice_push_only_global,
+        GRID_TENSOR_CHANNELS_PUSH, GLOBAL_DIM_PUSH,
+    )
+    bs, feat = _load("assets/maps/phase6/phase6_0001.txt")
+    X = build_grid_tensor(bs, feat)
+    u = build_global_features(bs, feat)
+    assert X.shape == (10, 14, 30)
+    X_push = slice_push_only_grid(X)
+    u_push = slice_push_only_global(u)
+    assert X_push.shape == (10, 14, GRID_TENSOR_CHANNELS_PUSH) == (10, 14, 27)
+    assert u_push.shape == (GLOBAL_DIM_PUSH,) == (12,)
+    Xb = X[None]
+    assert slice_push_only_grid(Xb).shape == (1, 10, 14, 27)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
