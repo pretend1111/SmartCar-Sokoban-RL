@@ -37,7 +37,7 @@ from smartcar_sokoban.symbolic.cand_features import encode_candidates
 from smartcar_sokoban.symbolic.grid_tensor import (
     build_grid_tensor, build_global_features,
 )
-from experiments.sage_pr.model import build_default_model
+from experiments.sage_pr.model import build_model_from_ckpt
 from experiments.sage_pr.build_dataset_v3 import (
     apply_solver_move, parse_phase456_seeds, list_phase_maps,
 )
@@ -204,6 +204,7 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
     total_lowlevel = 0
     total_teacher_low = 0
     teacher_won = 0
+    failed: List[Tuple[str, int]] = []
     for map_path in maps:
         if verified_seeds_map is not None and map_path in verified_seeds_map:
             ms = verified_seeds_map[map_path][:max(1, len(seeds_per_map))]
@@ -220,6 +221,8 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
             if won:
                 n_won += 1
                 total_lowlevel += n_low
+            else:
+                failed.append((map_path, seed))
             total_steps += steps
             total_inf_ms += avg_inf * 1000
 
@@ -243,6 +246,7 @@ def evaluate_phase(model, device, phase: int, seeds_per_map: List[int],
         "ratio_model_teacher": (total_lowlevel / max(n_won, 1)) /
                                 max(1, total_teacher_low / max(teacher_won, 1)),
         "teacher_won": teacher_won,
+        "failed": failed,
     }
 
 
@@ -272,8 +276,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ckpt = torch.load(args.ckpt, map_location=device)
-    model = build_default_model().to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model = build_model_from_ckpt(args.ckpt, device=device)
     model.eval()
     print(f"loaded {args.ckpt}, val_acc={ckpt.get('val_acc', '?'):.3f}")
 
@@ -321,8 +324,15 @@ def main():
         print(line)
 
     if args.out:
+        # Print all failed maps
+        for r in results:
+            failed = r.get("failed", [])
+            if failed:
+                print(f"\nFailed phase {r['phase']} ({len(failed)}):")
+                for mp, seed in failed:
+                    print(f"  {mp} seed={seed}")
         with open(args.out, "w") as f:
-            json.dump(results, f, indent=2)
+            json.dump(results, f, indent=2, default=list)
         print(f"saved to {args.out}")
 
 

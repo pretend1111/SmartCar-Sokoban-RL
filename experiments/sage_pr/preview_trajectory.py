@@ -85,8 +85,35 @@ def _record_apply_solver_move(eng: GameEngine, move, log: List[int]) -> bool:
     return True
 
 
+def _record_apply_inspect(eng: GameEngine, cand, log: List[int]) -> bool:
+    """inspect 候选展开 + 记 log."""
+    from experiments.sage_pr.belief_ida_solver import _heading_to_angle
+    from smartcar_sokoban.solver.explorer import compute_facing_actions
+    if cand.viewpoint_col is None:
+        return False
+    eng.discrete_step(6); log.append(6)
+    state = eng.get_state()
+    obstacles = set()
+    for b in state.boxes: obstacles.add(pos_to_grid(b.x, b.y))
+    for bm in state.bombs: obstacles.add(pos_to_grid(bm.x, bm.y))
+    car_grid = pos_to_grid(state.car_x, state.car_y)
+    target = (cand.viewpoint_col, cand.viewpoint_row)
+    if car_grid != target:
+        path = bfs_path(car_grid, target, state.grid, obstacles)
+        if path is None: return False
+        for pdx, pdy in path:
+            a = direction_to_abs_action(pdx, pdy)
+            eng.discrete_step(a); log.append(a)
+    state = eng.get_state()
+    rot_acts = compute_facing_actions(state.car_angle,
+                                       _heading_to_angle(cand.inspect_heading or 0))
+    for a in rot_acts:
+        eng.discrete_step(a); log.append(a)
+    return True
+
+
 def _record_solver_phase(eng: GameEngine, log: List[int],
-                          *, time_limit: float = 30.0) -> bool:
+                          *, time_limit: float = 60.0) -> bool:
     """跑 MultiBoxSolver, 录每一步 push 的 low-level. 返回是否解出."""
     state = eng.get_state()
     boxes = [(pos_to_grid(b.x, b.y), b.class_id) for b in state.boxes]
@@ -197,10 +224,174 @@ def _recorder_v1_v3(map_path: str, seed: int):
     return log, info
 
 
+_MODEL_CKPT_GLOBAL: Dict[str, object] = {"model": None, "device": None, "ckpt": None}
+
+
+def _recorder_model(map_path: str, seed: int):
+    """模型 rollout — 用 v3_large9 (或 _MODEL_CKPT_GLOBAL["ckpt"] 覆盖) 跑 top-1 greedy, 录每一步 low-level."""
+    import numpy as np
+    import torch
+    from experiments.sage_pr.model import build_model_from_ckpt
+    from experiments.sage_pr.evaluate_sage_pr import (
+        candidate_to_solver_move, _state_signature,
+    )
+    from experiments.sage_pr.belief_ida_solver import apply_inspect
+    from experiments.sage_pr.build_dataset_v3 import apply_solver_move
+    from smartcar_sokoban.symbolic.belief import BeliefState
+    from smartcar_sokoban.symbolic.features import compute_domain_features
+    from smartcar_sokoban.symbolic.candidates import (
+        generate_candidates, candidates_legality_mask,
+    )
+    from smartcar_sokoban.symbolic.cand_features import encode_candidates
+    from smartcar_sokoban.symbolic.grid_tensor import (
+        build_grid_tensor, build_global_features,
+    )
+
+    ckpt = _MODEL_CKPT_GLOBAL["ckpt"] or ".agent/sage_pr/runs/v3_large9/best.pt"
+    if _MODEL_CKPT_GLOBAL["model"] is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = build_model_from_ckpt(ckpt, device=device)
+        model.eval()
+        _MODEL_CKPT_GLOBAL["model"] = model
+        _MODEL_CKPT_GLOBAL["device"] = device
+    model = _MODEL_CKPT_GLOBAL["model"]
+    device = _MODEL_CKPT_GLOBAL["device"]
+
+    random.seed(seed)
+    eng = GameEngine(); eng.reset(map_path)
+    log: List[int] = []
+    info = {"won": False, "n_macros": 0}
+
+    visited = {_state_signature(eng.get_state())}
+    step_limit = 80
+    top_k = 1   # 纯 greedy; top_k>1 会引入 visited-skip 启发, 跟 eval (beam search) 不一致
+    for step in range(step_limit):
+        s = eng.get_state()
+        if s.won:
+            info["won"] = True
+            info["n_macros"] = step
+            return log, info
+        bs = BeliefState.from_engine_state(s, fully_observed=True)
+        feat = compute_domain_features(bs)
+        cands = generate_candidates(bs, feat, enforce_sigma_lock=False)
+        legal = [c.legal for c in cands]
+        if not any(legal):
+            info["n_macros"] = step
+            return log, info
+
+        X_grid = build_grid_tensor(bs, feat).transpose(2, 0, 1)
+        X_cand = encode_candidates(cands, bs, feat)
+        u_global = build_global_features(bs, feat)
+        mask = candidates_legality_mask(cands)
+        xg = torch.from_numpy(X_grid).unsqueeze(0).to(device)
+        xc = torch.from_numpy(X_cand).unsqueeze(0).to(device)
+        ug = torch.from_numpy(u_global).unsqueeze(0).to(device)
+        mk = torch.from_numpy(mask).unsqueeze(0).to(device)
+        with torch.no_grad():
+            score, _, _, _, _ = model(xg, xc, ug, mk)
+        sn = score.cpu().numpy().squeeze(0)
+        sn[~np.array(legal)] = -1e9
+        order = np.argsort(-sn)
+
+        # visited check on clone (用未 wrap 的 apply_solver_move / apply_inspect, 不会污染 log)
+        chosen = None
+        for k in range(min(top_k, len(order))):
+            idx = int(order[k])
+            cand = cands[idx]
+            if not cand.legal: continue
+            eng_clone = copy.deepcopy(eng)
+            if cand.type == "inspect":
+                ok = apply_inspect(eng_clone, cand)
+            else:
+                m = candidate_to_solver_move(cand, bs)
+                ok = m is not None and apply_solver_move(eng_clone, m)
+            if not ok: continue
+            sig = _state_signature(eng_clone.get_state())
+            if sig in visited: continue
+            chosen = idx; break
+        if chosen is None:
+            chosen = int(order[0])
+        cand = cands[chosen]
+
+        # 真正应用到 eng — 用 _record_apply_solver_move 手动记 log (避免 monkey-patch closure bug)
+        if cand.type == "inspect":
+            ok = _record_apply_inspect(eng, cand, log)
+        else:
+            m = candidate_to_solver_move(cand, bs)
+            ok = m is not None and _record_apply_solver_move(eng, m, log)
+        if not ok:
+            info["n_macros"] = step
+            return log, info
+        visited.add(_state_signature(eng.get_state()))
+
+    info["n_macros"] = step_limit
+    info["won"] = eng.get_state().won
+    return log, info
+
+
+def _recorder_model_search(map_path: str, seed: int):
+    """模型 beam search 推理 (beam=8 lookahead=25) — 这才是 eval 报告 96-100% 的真实路径."""
+    import torch
+    from experiments.sage_pr.model import build_model_from_ckpt
+    from experiments.sage_pr.rollout_search_eval import (
+        rollout_search_step, _apply_any,
+    )
+    from experiments.sage_pr.evaluate_sage_pr import _state_signature
+    from smartcar_sokoban.symbolic.belief import BeliefState
+
+    ckpt = _MODEL_CKPT_GLOBAL["ckpt"] or ".agent/sage_pr/runs/v3_large9/best.pt"
+    if _MODEL_CKPT_GLOBAL["model"] is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = build_model_from_ckpt(ckpt, device=device)
+        model.eval()
+        _MODEL_CKPT_GLOBAL["model"] = model
+        _MODEL_CKPT_GLOBAL["device"] = device
+    model = _MODEL_CKPT_GLOBAL["model"]
+    device = _MODEL_CKPT_GLOBAL["device"]
+
+    from experiments.sage_pr.evaluate_sage_pr import candidate_to_solver_move
+    random.seed(seed)
+    eng = GameEngine(); eng.reset(map_path)
+    log: List[int] = []
+    info = {"won": False, "n_macros": 0}
+
+    visited = {_state_signature(eng.get_state())}
+    beam_width = 8
+    lookahead = 25
+    step_limit = 60
+    for step in range(step_limit):
+        s = eng.get_state()
+        if s.won:
+            info["won"] = True; info["n_macros"] = step
+            return log, info
+        res = rollout_search_step(
+            model, device, eng, visited,
+            beam_width=beam_width, lookahead=lookahead,
+            fully_observed=True, enforce_sigma_lock=False,
+        )
+        if res is None:
+            info["n_macros"] = step; return log, info
+        chosen_idx, cand = res
+        bs_now = BeliefState.from_engine_state(eng.get_state(), fully_observed=True)
+        if cand.type == "inspect":
+            ok = _record_apply_inspect(eng, cand, log)
+        else:
+            m = candidate_to_solver_move(cand, bs_now)
+            ok = m is not None and _record_apply_solver_move(eng, m, log)
+        if not ok:
+            info["n_macros"] = step; return log, info
+        visited.add(_state_signature(eng.get_state()))
+    info["n_macros"] = step_limit
+    info["won"] = eng.get_state().won
+    return log, info
+
+
 RECORDERS: Dict[str, Callable] = {
     "v1_orig": _recorder_v1_orig,
     "v1_v2": _recorder_v1_v2,
     "v1_v3": _recorder_v1_v3,
+    "model": _recorder_model,
+    "model_search": _recorder_model_search,
 }
 
 

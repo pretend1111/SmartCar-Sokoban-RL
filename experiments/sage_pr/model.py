@@ -349,3 +349,25 @@ def build_large_model() -> SAGEPolicyRanker:
         c_dim=128,
         value_hidden=48,
     )
+
+
+def detect_model_size(state_dict: dict) -> str:
+    """根据 state_dict 推断是 default 还是 large 模型."""
+    if "grid_encoder.stem.weight" in state_dict:
+        # default: shape[0]=32, large: shape[0]=48
+        return "large" if state_dict["grid_encoder.stem.weight"].shape[0] >= 48 else "default"
+    return "default"
+
+
+def build_model_from_ckpt(ckpt_path: str, device=None) -> SAGEPolicyRanker:
+    """根据 ckpt 自动构建 default/large 并加载权重."""
+    import torch
+    ck = torch.load(ckpt_path, map_location=device)
+    sd = ck["model_state_dict"]
+    size = ck.get("model_size", detect_model_size(sd))
+    builder = build_large_model if size == "large" else build_default_model
+    model = builder()
+    if device is not None:
+        model = model.to(device)
+    model.load_state_dict(sd)
+    return model

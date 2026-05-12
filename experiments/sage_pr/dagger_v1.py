@@ -44,7 +44,7 @@ from experiments.sage_pr.build_dataset_v3 import (
     match_move_to_candidate, SOURCE_AUTO,
 )
 from experiments.sage_pr.evaluate_sage_pr import candidate_to_solver_move, _state_signature
-from experiments.sage_pr.model import build_default_model
+from experiments.sage_pr.model import build_default_model, build_model_from_ckpt
 
 
 def teacher_label_v1(eng: GameEngine, cands, bs: BeliefState,
@@ -110,6 +110,8 @@ def collect_v1_dagger_episode(model, device, map_path: str, seed: int, phase: in
             label=t_label, phase=phase, source=SOURCE_AUTO,
         ))
 
+        # 若启用 rollout-advance, 用 1-step lookahead 评估每个 cand 进度 (用 push_dist 减少)
+        # 否则用 model top-1
         # 模型推理
         xg = torch.from_numpy(samples[-1].X_grid.transpose(2, 0, 1).astype(np.float32)).unsqueeze(0).to(device)
         xc = torch.from_numpy(samples[-1].X_cand.astype(np.float32)).unsqueeze(0).to(device)
@@ -154,9 +156,7 @@ _MODEL_GLOBAL = {"model": None, "device": None}
 def _worker_init(ckpt_path: str):
     """子进程初始化: 加载模型到 CPU (避免多 process 抢 GPU)."""
     device = torch.device("cpu")
-    ck = torch.load(ckpt_path, map_location=device)
-    model = build_default_model().to(device)
-    model.load_state_dict(ck["model_state_dict"])
+    model = build_model_from_ckpt(ckpt_path, device=device)
     model.eval()
     _MODEL_GLOBAL["model"] = model
     _MODEL_GLOBAL["device"] = device
@@ -189,9 +189,7 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ck = torch.load(args.ckpt, map_location=device)
-    model = build_default_model().to(device)
-    model.load_state_dict(ck["model_state_dict"])
+    model = build_model_from_ckpt(args.ckpt, device=device)
     model.eval()
     print(f"loaded {args.ckpt}")
 

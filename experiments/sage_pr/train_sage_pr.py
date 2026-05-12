@@ -37,7 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from experiments.sage_pr.model import build_default_model
+from experiments.sage_pr.model import build_default_model, build_large_model
 
 
 # ── 数据集 ────────────────────────────────────────────────
@@ -263,7 +263,8 @@ def train(args):
         )
         train_idx_t = val_idx_t = train_weights_t = None
 
-    model = build_default_model().to(device)
+    model_builder = build_large_model if args.model == "large" else build_default_model
+    model = model_builder().to(device)
     if args.init_ckpt:
         ck = torch.load(args.init_ckpt, map_location=device)
         model.load_state_dict(ck["model_state_dict"])
@@ -411,6 +412,7 @@ def train(args):
                 "epoch": epoch + 1,
                 "val_acc": val_acc,
                 "args": vars(args),
+                "model_size": args.model,
             }, ckpt_path)
             log(f"  saved best (val_acc={val_acc:.3f}) → {ckpt_path}")
 
@@ -434,6 +436,8 @@ def main():
                         help="DataLoader workers (0 = main thread). >0 大幅减 GPU 等待.")
     parser.add_argument("--gpu-resident", action="store_true",
                         help="把整数据集一次性搬 GPU (~5GB), 跳过 DataLoader, GPU 满载.")
+    parser.add_argument("--model", default="default", choices=["default", "large"],
+                        help="model size: default=105K, large=194K.")
     args = parser.parse_args()
     train(args)
 
