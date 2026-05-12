@@ -58,6 +58,19 @@ SEG_INFO_GAIN = (108, 118)
 SEG_GLOBAL = (118, 128)
 
 
+# ── push_only 切片 (新架构: 探索由板上 BFS 算法做, NN 不需要 info_gain) ──
+# 切掉 SEG_INFO_GAIN [108:118] (10 维), 拼接前后两段 → 118 维输入
+CAND_FEATURE_DIM_PUSH = 118
+
+
+def slice_push_only_cand(X_cand: np.ndarray) -> np.ndarray:
+    """[..., N, 128] -> [..., N, 118], 去掉 info_gain 段."""
+    return np.concatenate(
+        [X_cand[..., :SEG_INFO_GAIN[0]], X_cand[..., SEG_INFO_GAIN[1]:]],
+        axis=-1,
+    )
+
+
 # ── 工具 ──────────────────────────────────────────────────
 
 def _norm_cell(col: int, row: int) -> tuple:

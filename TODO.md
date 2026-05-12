@@ -19,11 +19,11 @@
 - [x] V2 调用方 (build_dataset_v6, belief_ida_solver, dagger_v2) 显式 push_only=False 保兼容
 - **完成判定**: tests/test_candidates.py 加 3 个 push_only test, 12 项全过 (0.13s)
 
-### Step 2. 候选特征瘦身 (`smartcar_sokoban/symbolic/cand_features.py`)
-- [ ] 删除 `info_gain` 段 (X_cand[:, :, 108:118]) 及 inspect-only 字段
-- [ ] 新候选维度 = 108 (或更小, 看实际删了多少)
-- [ ] 加常量 `CAND_FEATURE_DIM_PUSH = <新维度>`
-- **完成判定**: 单测 `tests/test_cand_features.py` 加 push_only test, 输出 shape 一致
+### Step 2. 候选特征瘦身 (`smartcar_sokoban/symbolic/cand_features.py`) ✅
+- [x] `encode_candidate` 保持 128 输出 (npz 向后兼容), 加 `slice_push_only_cand()` 切到 118 维
+- [x] 切掉 SEG_INFO_GAIN [108:118] 10 维 (探索信号, NN 不需要)
+- [x] 加常量 `CAND_FEATURE_DIM_PUSH = 118`
+- **完成判定**: tests/test_cand_features.py 加 2 个 push_only 切片 test, 10 项全过 (0.18s)
 
 ### Step 3. 网格特征瘦身 (`smartcar_sokoban/symbolic/grid_tensor.py`)
 - [ ] 删除 ch29 `info_gain_heatmap`

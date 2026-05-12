@@ -132,6 +132,31 @@ def test_no_nan_no_inf():
         assert (X >= -1.5).all() and (X <= 1.5).all()
 
 
+# ── push_only slice (新架构) ─────────────────────────────────
+
+def test_slice_push_only_cand_shape():
+    from smartcar_sokoban.symbolic.cand_features import (
+        slice_push_only_cand, CAND_FEATURE_DIM_PUSH,
+    )
+    bs, feat, cands = _load("assets/maps/phase6/phase6_0001.txt")
+    X = encode_candidates(cands, bs, feat)
+    assert X.shape[-1] == 128
+    X_push = slice_push_only_cand(X)
+    assert X_push.shape[-1] == CAND_FEATURE_DIM_PUSH == 118
+    Xb = X[None]
+    Xb_push = slice_push_only_cand(Xb)
+    assert Xb_push.shape == (1, 64, 118)
+
+
+def test_slice_push_only_drops_info_gain():
+    """切完后 X_push 等于 cat([X[:, :108], X[:, 118:]])."""
+    from smartcar_sokoban.symbolic.cand_features import slice_push_only_cand
+    X = np.random.rand(64, 128).astype(np.float32)
+    X_push = slice_push_only_cand(X)
+    np.testing.assert_array_equal(X_push[:, :108], X[:, :108])
+    np.testing.assert_array_equal(X_push[:, 108:], X[:, 118:])
+
+
 # ── 性能 ──────────────────────────────────────────────────
 
 def test_benchmark_under_3ms():
