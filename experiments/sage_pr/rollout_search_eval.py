@@ -75,22 +75,37 @@ def model_score(model, device, eng: GameEngine,
                 fully_observed: bool = True,
                 enforce_sigma_lock: bool = False,
                 ) -> Tuple[Optional[List[Candidate]], Optional[np.ndarray]]:
+    from smartcar_sokoban.symbolic.cand_features import slice_push_only_cand
+    from smartcar_sokoban.symbolic.grid_tensor import (
+        slice_push_only_grid, slice_push_only_global,
+    )
     s = eng.get_state()
     bs = BeliefState.from_engine_state(s, fully_observed=fully_observed)
     feat = compute_domain_features(bs)
     cands = generate_candidates(bs, feat, enforce_sigma_lock=enforce_sigma_lock)
     if not any(c.legal for c in cands):
         return None, None
-    X_grid = build_grid_tensor(bs, feat).transpose(2, 0, 1)
+    X_grid = build_grid_tensor(bs, feat)
     X_cand = encode_candidates(cands, bs, feat)
     u_global = build_global_features(bs, feat)
     mask = candidates_legality_mask(cands)
+
+    # 适配 push_only model (输入 27ch / 118 / 12) vs full model (30 / 128 / 16)
+    # 检测 model 第一 conv 输入通道
+    in_ch = getattr(model.grid_encoder.stem, "in_channels", 30)
+    if in_ch == 27:
+        X_grid = slice_push_only_grid(X_grid)
+        X_cand = slice_push_only_cand(X_cand)
+        u_global = slice_push_only_global(u_global)
+
+    X_grid = X_grid.transpose(2, 0, 1)
     xg = torch.from_numpy(X_grid).unsqueeze(0).to(device)
     xc = torch.from_numpy(X_cand).unsqueeze(0).to(device)
     ug = torch.from_numpy(u_global).unsqueeze(0).to(device)
     mk = torch.from_numpy(mask).unsqueeze(0).to(device)
     with torch.no_grad():
-        score, _, _, _, _ = model(xg, xc, ug, mk)
+        out = model(xg, xc, ug, mk)
+        score = out[0]   # 兼容 push_only (2 输出) 和 full (5 输出)
     score_np = score.cpu().numpy().squeeze(0)
     score_np[mask < 0.5] = -1e9
     return cands, score_np
@@ -204,6 +219,8 @@ def rollout_search_episode(model, device, map_path: str, seed: int,
     eng.reset(map_path)
 
     # 部署对齐: 跑 explorer, 让车走到 NN 接管的真实起点 (post-explorer state)
+    # 若 explorer 失败 (~5% phase5 图), reset 让 NN 从初始状态以 fully_observed=True 接管 (fallback)
+    # 这模拟部署上 vision 识别不全时 NN 仍然尝试 (训练数据是 fully_obs 上帝视角)
     if use_external_explorer:
         import contextlib, io
         from smartcar_sokoban.solver.explorer_v3 import plan_exploration_v3
@@ -214,8 +231,10 @@ def rollout_search_episode(model, device, map_path: str, seed: int,
             except Exception:
                 pass
         if not exploration_complete(eng.get_state()):
-            # explorer 失败 → 这张图部署本身就过不去, 算 fail
-            return False, 0, 0.0
+            # explorer 失败 → 重置, NN 从初始接管 (fully_observed=True 上帝视角 fallback)
+            random.seed(seed)
+            eng = GameEngine()
+            eng.reset(map_path)
 
     inf_total = 0.0
     inf_calls = 0

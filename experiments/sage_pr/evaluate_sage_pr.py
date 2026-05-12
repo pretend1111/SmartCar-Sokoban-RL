@@ -130,11 +130,23 @@ def rollout_one(model, device, map_path: str, seed: int, *,
         if not any(legal):
             return False, step, inf_total / max(inf_calls, 1), lowlevel_count[0]
 
-        X_grid = build_grid_tensor(bs, feat).transpose(2, 0, 1)
+        X_grid = build_grid_tensor(bs, feat)
         X_cand = encode_candidates(cands, bs, feat)
         u_global = build_global_features(bs, feat)
         mask = candidates_legality_mask(cands)
 
+        # 适配 push_only model (输入 27ch / 118 / 12)
+        from smartcar_sokoban.symbolic.cand_features import slice_push_only_cand
+        from smartcar_sokoban.symbolic.grid_tensor import (
+            slice_push_only_grid, slice_push_only_global,
+        )
+        in_ch = getattr(model.grid_encoder.stem, "in_channels", 30)
+        if in_ch == 27:
+            X_grid = slice_push_only_grid(X_grid)
+            X_cand = slice_push_only_cand(X_cand)
+            u_global = slice_push_only_global(u_global)
+
+        X_grid = X_grid.transpose(2, 0, 1)
         xg_t = torch.from_numpy(X_grid).unsqueeze(0).to(device)
         xc_t = torch.from_numpy(X_cand).unsqueeze(0).to(device)
         ug_t = torch.from_numpy(u_global).unsqueeze(0).to(device)
@@ -142,7 +154,8 @@ def rollout_one(model, device, map_path: str, seed: int, *,
 
         t0 = time.perf_counter()
         with torch.no_grad():
-            score, _, _, _, _ = model(xg_t, xc_t, ug_t, mk_t)
+            out = model(xg_t, xc_t, ug_t, mk_t)
+            score = out[0]  # 兼容 push_only / full
         inf_total += time.perf_counter() - t0
         inf_calls += 1
 
