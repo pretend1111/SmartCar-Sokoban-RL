@@ -58,10 +58,11 @@
 - [x] 41 min on RTX 5060 Ti, CPU bound (100%) / GPU 49%
 - **完成判定**: val_acc=0.972 (best ep80), p1=98.9/p2=94.6/p3=87.8/p4=95.4/p5=98.7/p6=97.6
 
-### Step 8. 全量 eval 加 --external-explorer
-- [ ] `rollout_search_eval.py --ckpt v5_push_only/best.pt --phases 1-6 --use-verified-seeds --max-maps 1011 --beam 8 --lookahead 25 --mode v1 --external-explorer`
-- [ ] 串行跑 6 phase (每个 ~50 min, 共 ~5 hr)
-- **完成判定**: 6 个 phase 全部 ≥ 95%
+### Step 8. 全量 eval 加 --external-explorer 🏃 跑中
+- [x] eval 代码适配 push_only model (2-output forward + 输入切片)
+- [x] 6 phase 并行 eval 启动 (.agent/sage_pr/runs/v5_push_only/eval_full/)
+- [ ] 等待完成 (~3-4 hr, 6-way GPU 共享)
+- **完成判定**: 6 phase 全部 ≥ 95% (期待 v3_large9 baseline 中 p1=100/p2=99.6/p3=98/p4=98.9/p5=97.8/p6=98.8 — v5 应至少匹配)
 
 ### Step 9. 如有 phase < 95% → targeted DAgger
 - [ ] 用 `experiments/sage_pr/dagger_targeted.py` 对 fail 图集中 oversample
