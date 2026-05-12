@@ -1,16 +1,87 @@
 # SmartCar-Sokoban-RL · SAGE-PR 架构重构 TODO
 
-> **目标 (本轮)**：**phase 1-6 全部 deterministic 通关率 ≥ 95%**。模型 int8 量化后 ≤ 500 KB、OpenART mini 单次推理 ≤ 50 ms、量化损失 ≤ 2pp。
+> **🎯 当前主任务 (2026-05-13 起): 推箱专一架构 (Explore-by-Algorithm + NN-for-Push)**
 >
-> **本轮迭代重点**：用 **V2 数据集** (god-mode A + 抑制场 + 嵌入 inspect, 96k samples 100% 翻译) 训练 SAGE-PR 模型, 让模型**自主完成探索 + 推箱**, 推理时不依赖外挂 plan_exploration. 同时把文档 §5.2 设计但 train_sage_pr.py 没实现的 **L_info / L_ranking** 损失项补上, 充分激活架构里早已为探索预留的 inductive bias (info_gain_head, deadlock_head, etc.)。
+> 部署架构定型: OpenART 板上 **传统 BFS 算法做识别探索, NN 专心做推箱**. NN 模型 / 数据 / 候选生成 全部**砍掉跟探索相关的部分**, 重训一个干净、专注、高效的推箱模型. 整个模型架构对 inspect / info_gain / partial-obs 的预留 inductive bias 不再需要 — 全删, 让模型容量集中在推箱.
 >
-> **终止条件 (硬规则)**：**任一 phase < 95% 都不能停**。每轮评估若有 phase 不达 95% → 回 §7 故障排查表挑下一招。同一招连续两次无效 → 切下一招。**phase 6 ≥ 90%** 是旧目标, 已弃, 现在统一 95%。
+> **完成判定**: 在 `--external-explorer` 模式下 (跑 plan_exploration_v3 → NN 推箱) 全量 1010+ maps eval, **phase 1-6 全部 ≥ 95%**, explorer-fail 图回退到初始状态 NN 也能搞定. 同时模型架构清单确认没有 inspect / info_gain 相关代码路径残留. 输出 `<promise>DONE</promise>` 仅当全部条件 unequivocally TRUE.
 >
-> **硬件**：Intel Core Ultra 7 265K（20 核 8P+12E）+ NVIDIA RTX 5060 Ti 16 GB。
+> **硬件**: Intel Core Ultra 7 265K + RTX 5060 Ti 16 GB. 环境: `conda run -n rl python ...`.
+
+---
+
+## 🚀 新架构任务清单 (按顺序执行)
+
+### Step 1. 候选生成器砍掉 inspect 类型 (`smartcar_sokoban/symbolic/candidates.py`) ✅
+- [x] `generate_candidates(bs, feat, push_only=True)` 加 push_only 默认 True 时**不生成 inspect 候选**
+- [x] 旧 inspect 相关分支保留 (push_only=False) 但不再走默认路径, 兼容旧 npz 加载
+- [x] 单测: 任一 phase 5 / 6 图 fully_observed=True 下生成的 cands `[c.type for c in cands]` 全 push_box / push_bomb, 无 inspect
+- [x] V2 调用方 (build_dataset_v6, belief_ida_solver, dagger_v2) 显式 push_only=False 保兼容
+- **完成判定**: tests/test_candidates.py 加 3 个 push_only test, 12 项全过 (0.13s)
+
+### Step 2. 候选特征瘦身 (`smartcar_sokoban/symbolic/cand_features.py`)
+- [ ] 删除 `info_gain` 段 (X_cand[:, :, 108:118]) 及 inspect-only 字段
+- [ ] 新候选维度 = 108 (或更小, 看实际删了多少)
+- [ ] 加常量 `CAND_FEATURE_DIM_PUSH = <新维度>`
+- **完成判定**: 单测 `tests/test_cand_features.py` 加 push_only test, 输出 shape 一致
+
+### Step 3. 网格特征瘦身 (`smartcar_sokoban/symbolic/grid_tensor.py`)
+- [ ] 删除 ch29 `info_gain_heatmap`
+- [ ] 删除 ch13 / 15 `box_known_mask` / `target_known_mask` (post-explorer 永远全 1, 信息量 0)
+- [ ] 删除 ch17-21 `box_id_inferred` 中 partial-obs 用的退化通道 (按需保留 push 距离差分相关)
+- [ ] 新 GRID_TENSOR_CHANNELS_PUSH = <数 24-26>
+- **完成判定**: 单测 grid_tensor 输出新 channel 数
+
+### Step 4. 模型架构瘦身 (`experiments/sage_pr/model.py`)
+- [ ] 删 `info_gain_head` (`heads.info_gain_fc`)
+- [ ] 删 `deadlock_head` (post-explorer push 路径上, deadlock 已经被 cand legality mask 过滤, 模型不需要再学)
+- [ ] `forward()` 返回 `(score, value)` 不再返回 dl/pg/ig
+- [ ] `build_push_only_model()` 新工厂: ~80K params (老 default 105K), 适合 int8 ≤ 200 KB
+- [ ] 模型 ckpt 加 `arch="push_only"` 字段, `build_model_from_ckpt()` 自动识别
+- **完成判定**: `from experiments.sage_pr.model import build_push_only_model; m=build_push_only_model(); print(m.num_parameters())` 输出 ≤ 100K
+
+### Step 5. 训练 loss 瘦身 (`experiments/sage_pr/train_sage_pr.py`)
+- [ ] 删除 L_info / L_progress 计算和加权项 (loss 只剩 L_policy + L_value)
+- [ ] 数据加载时把旧 npz 的 X_grid / X_cand 切片到新维度 (兼容老数据格式不重新生成)
+- [ ] `--arch push_only` 默认: 用 `build_push_only_model()`
+- **完成判定**: 训 1 epoch 跑通 no error, val_acc 出数字
+
+### Step 6. 数据集复用 (不重生)
+- [ ] 用现有 `runs/sage_pr/full_v5_v3/phase{1..6}_exact.npz` (已经 post-explorer)
+- [ ] 用所有 dagger_v1_r* 和 dagger_targeted_p5_* (也是 post-explorer)
+- [ ] 训练加载时 slice 到新维度 (新 X_grid_ch < 30, X_cand_dim < 128)
+- **完成判定**: 训练 log 显示 `train n=` 跟之前数字一致 (例如 347248)
+
+### Step 7. 训练 v5_push_only
+- [ ] `python experiments/sage_pr/train_sage_pr.py --arch push_only --tag v5_push_only --batch-size 256 --lr 3e-4 --epochs 80 --phase-dist hard --num-workers 0` 用全部数据
+- [ ] 大约 25-40 min 在 RTX 5060 Ti
+- **完成判定**: train.log 显示 val_acc ≥ 0.95
+
+### Step 8. 全量 eval 加 --external-explorer
+- [ ] `rollout_search_eval.py --ckpt v5_push_only/best.pt --phases 1-6 --use-verified-seeds --max-maps 1011 --beam 8 --lookahead 25 --mode v1 --external-explorer`
+- [ ] 串行跑 6 phase (每个 ~50 min, 共 ~5 hr)
+- **完成判定**: 6 个 phase 全部 ≥ 95%
+
+### Step 9. 如有 phase < 95% → targeted DAgger
+- [ ] 用 `experiments/sage_pr/dagger_targeted.py` 对 fail 图集中 oversample
+- [ ] 重训 v5_push_only_dag1 加新 DAgger 数据
+- [ ] 重 eval (Step 8)
+- **完成判定**: 全 phase ≥ 95%
+
+### Step 10. 写 README + push GitHub
+- [ ] 把新架构写到 README §3 当前状态
+- [ ] §10 遗留问题里把旧 (V1 fully-observed leakage) 的 §10.1 改成"已解决, 当前架构 = 传统 explorer + NN push"
+- [ ] commit + push
+
+---
+
+> **历史目标 (已废弃 - 自主探索路线)**: 用 V2 数据集 (god-mode A + 抑制场 + 嵌入 inspect) 训练模型让自己学探索. 已确认效率低 / inductive bias 错配 / 不必要. **改走 explorer 算法 + NN push 双系统**, 模型干净专注.
 >
-> **环境**：所有 python 命令在 conda 环境 `rl` 下运行（`conda run -n rl python ...`）。
+> **当前模型 (历史 baseline)**: `v3_large9/best.pt` (large 194K params 含 info_gain_head 等冗余). 不再使用, 但留作对比 baseline.
 >
-> **核心纪律**：启动任何长跑脚本（数据生成 / 训练 / DAgger / 评估）前必须开 §6 监控；任务期间每 5-10 分钟 grep 监控日志。CPU 长期 < 70% 或 GPU 长期 < 50% 立即停下来诊断瓶颈。
+> **硬件**: Intel Core Ultra 7 265K + RTX 5060 Ti 16 GB. **环境**: `conda run -n rl python ...`.
+>
+> **核心纪律**: 启动长跑脚本前开 §6 监控; 每 5-10 min grep 监控日志; CPU < 70% 或 GPU < 50% 立即诊断瓶颈.
 
 ---
 

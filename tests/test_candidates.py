@@ -134,6 +134,38 @@ def test_no_macro_through_deadlock():
                 f"macro k={c.run_length} 经过死锁格 ({cell_col},{cell_row})"
 
 
+# ── push_only flag (部署架构: 板上 explorer + NN 推箱) ───────
+
+def test_push_only_no_inspect():
+    """push_only=True (默认) 不生成 inspect 候选."""
+    bs = _load("assets/maps/phase5/phase5_0001.txt")
+    feat = compute_domain_features(bs)
+    cands = generate_candidates(bs, feat)  # push_only 默认 True
+    types = {c.type for c in cands}
+    assert "inspect" not in types, f"push_only=True 时 inspect 不应出现, got types: {types}"
+
+
+def test_push_only_false_keeps_inspect_compat():
+    """push_only=False 仍生成 inspect (向后兼容)."""
+    bs = _load("assets/maps/phase5/phase5_0001.txt")
+    feat = compute_domain_features(bs)
+    cands_pushonly = generate_candidates(bs, feat, push_only=True)
+    cands_full = generate_candidates(bs, feat, push_only=False)
+    # full 路径产生的候选数 >= push_only (多了 inspect)
+    n_full_real = sum(1 for c in cands_full if c.type != "pad")
+    n_po_real = sum(1 for c in cands_pushonly if c.type != "pad")
+    assert n_full_real >= n_po_real
+
+
+def test_push_only_phase6():
+    """phase 6 fully_observed=True 下 push_only 也不应有 inspect."""
+    bs = _load("assets/maps/phase6/phase6_11.txt")
+    feat = compute_domain_features(bs)
+    cands = generate_candidates(bs, feat)
+    types = [c.type for c in cands if c.type != "pad"]
+    assert "inspect" not in types
+
+
 # ── 性能 ──────────────────────────────────────────────────
 
 def test_benchmark_candidates_under_2ms():

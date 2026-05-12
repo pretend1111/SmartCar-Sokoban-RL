@@ -125,7 +125,7 @@ def collect_v2_dagger_episode(model, device, map_path: str, seed: int, phase: in
             break
         bs = BeliefState.from_engine_state(s, fully_observed=False)
         feat = compute_domain_features(bs)
-        cands = generate_candidates(bs, feat, enforce_sigma_lock=True)
+        cands = generate_candidates(bs, feat, enforce_sigma_lock=True, push_only=False)
         legal = [c.legal for c in cands]
         if not any(legal):
             break

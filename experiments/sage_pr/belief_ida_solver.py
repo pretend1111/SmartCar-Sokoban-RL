@@ -377,7 +377,7 @@ def belief_ida_solve(map_path: str, seed: int,
 
         bs = BeliefState.from_engine_state(cur_state, fully_observed=False)
         feat = compute_domain_features(bs)
-        cands = generate_candidates(bs, feat)
+        cands = generate_candidates(bs, feat, push_only=False)  # JEPP 需要 inspect
 
         # 过滤 σ_pairs by current K
         sigma_pairs = filter_compatible(sigma_pairs, K_box, K_target)

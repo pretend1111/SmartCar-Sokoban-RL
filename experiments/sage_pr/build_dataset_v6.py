@@ -212,7 +212,7 @@ def collect_episode_v2(map_path: str, phase: int, seed: int,
     while a_idx < len(plan):
         bs = BeliefState.from_engine_state(eng.get_state(), fully_observed=False)
         feat = compute_domain_features(bs)
-        cands = generate_candidates(bs, feat, enforce_sigma_lock=True)
+        cands = generate_candidates(bs, feat, enforce_sigma_lock=True, push_only=False)
 
         move = plan[a_idx]
         label = match_move_to_candidate(move, cands, bs, run_length=1)
@@ -252,7 +252,7 @@ def collect_episode_v2(map_path: str, phase: int, seed: int,
         # push illegal — 多半因 σ 未锁. 找需要 unlock 的 box / target
         if inspect_streak >= max_inspects_per_push:
             # 兜底: 抑制场卡死, 强行用无抑制 cands 找 push (产模型不该见的样本但保数据)
-            cands_nosup = generate_candidates(bs, feat, enforce_sigma_lock=False)
+            cands_nosup = generate_candidates(bs, feat, enforce_sigma_lock=False, push_only=False)
             label2 = match_move_to_candidate(move, cands_nosup, bs, run_length=1)
             if label2 is None:
                 info["n_label_miss"] += 1

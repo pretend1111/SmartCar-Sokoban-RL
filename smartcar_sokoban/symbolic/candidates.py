@@ -609,9 +609,13 @@ def _gen_inspect_candidates(bs: BeliefState,
 def generate_candidates(bs: BeliefState,
                         feat: Optional[DomainFeatures] = None,
                         max_total: int = MAX_CANDIDATES,
-                        enforce_sigma_lock: bool = False) -> List[Candidate]:
+                        enforce_sigma_lock: bool = False,
+                        push_only: bool = True) -> List[Candidate]:
     """生成 ≤ max_total 个候选 (含 padding).
 
+    push_only=True (默认, 部署架构): 只生成 push_box / push_bomb 候选,
+        不生成 inspect — 探索阶段由板上传统 BFS 算法负责, NN 只接手推箱.
+    push_only=False: 同时生成 inspect 候选 (旧自主探索路线, 已废弃但代码保留兼容性).
     enforce_sigma_lock=True (V2): 推到 target cell 的 push 必须 σ 锁定 (Π 单射)
         否则标 illegal — 强制 inspect 优先.
     """
@@ -621,7 +625,8 @@ def generate_candidates(bs: BeliefState,
     cands: List[Candidate] = []
     cands.extend(_gen_push_box_candidates(bs, feat, enforce_sigma_lock=enforce_sigma_lock))
     cands.extend(_gen_push_bomb_candidates(bs, feat))
-    cands.extend(_gen_inspect_candidates(bs, feat))
+    if not push_only:
+        cands.extend(_gen_inspect_candidates(bs, feat))
 
     # 截断到 max_total - 1, 留 1 位给 return_garage / 全局 fallback
     if len(cands) > max_total:
