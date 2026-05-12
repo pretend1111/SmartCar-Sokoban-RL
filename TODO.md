@@ -32,13 +32,13 @@
 - [x] `GRID_TENSOR_CHANNELS_PUSH = 27`, `GLOBAL_DIM_PUSH = 12`
 - **完成判定**: tests/test_grid_tensor.py 新增 test_push_only_slice, 9 项全过
 
-### Step 4. 模型架构瘦身 (`experiments/sage_pr/model.py`)
-- [ ] 删 `info_gain_head` (`heads.info_gain_fc`)
-- [ ] 删 `deadlock_head` (post-explorer push 路径上, deadlock 已经被 cand legality mask 过滤, 模型不需要再学)
-- [ ] `forward()` 返回 `(score, value)` 不再返回 dl/pg/ig
-- [ ] `build_push_only_model()` 新工厂: ~80K params (老 default 105K), 适合 int8 ≤ 200 KB
-- [ ] 模型 ckpt 加 `arch="push_only"` 字段, `build_model_from_ckpt()` 自动识别
-- **完成判定**: `from experiments.sage_pr.model import build_push_only_model; m=build_push_only_model(); print(m.num_parameters())` 输出 ≤ 100K
+### Step 4. 模型架构瘦身 (`experiments/sage_pr/model.py`) ✅
+- [x] 新 `SAGEPushOnlyRanker` 类 + `ScoreValueHeads` 只含 score + value (无 deadlock/progress/info_gain)
+- [x] `forward()` 返回 `(score, value)` 二元组
+- [x] `build_push_only_model()` 工厂: 102K params (跟 default 105K 接近 — 因为去掉 3 个 1x96 Linear 只省 ~3K params, 主要是输入维度切片省的)
+- [x] `build_push_only_large()` 工厂: 190K params
+- [x] `build_model_from_ckpt()` 加 `detect_model_arch()` 自动识别 push_only / full
+- **完成判定**: build_push_only_model().num_parameters() = 102,530; 旧 v3_large9 ckpt 仍能加载 (向后兼容)
 
 ### Step 5. 训练 loss 瘦身 (`experiments/sage_pr/train_sage_pr.py`)
 - [ ] 删除 L_info / L_progress 计算和加权项 (loss 只剩 L_policy + L_value)

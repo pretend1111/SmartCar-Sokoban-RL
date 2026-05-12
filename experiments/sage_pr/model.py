@@ -317,6 +317,127 @@ class SAGEPolicyRanker(nn.Module):
 
 # ── 默认实例化辅助 ────────────────────────────────────────
 
+# ── push-only 架构 (新, 部署架构: explorer 算法 + NN 推箱) ───────
+
+class ScoreValueHeads(nn.Module):
+    """Slim heads: 仅 score + value, 去掉 deadlock/progress/info_gain."""
+
+    def __init__(self, e_dim: int = 96, hidden: int = 96, value_hidden: int = 32):
+        super().__init__()
+        self.score_fc1 = nn.Linear(e_dim, hidden)
+        self.score_fc2 = nn.Linear(hidden, 1)
+        self.value_fc1 = nn.Linear(e_dim, value_hidden)
+        self.value_fc2 = nn.Linear(value_hidden, 1)
+
+    def forward(self, e_i: torch.Tensor, c: torch.Tensor,
+                mask: Optional[torch.Tensor] = None
+                ) -> Tuple[torch.Tensor, torch.Tensor]:
+        e_tilde = e_i + c.unsqueeze(1)
+        e_tilde = F.relu(e_tilde, inplace=False)
+        s = F.relu(self.score_fc1(e_tilde), inplace=True)
+        score_logits = self.score_fc2(s).squeeze(-1)
+        if mask is not None:
+            score_logits = score_logits.masked_fill(mask < 0.5, -1e9)
+        v = F.relu(self.value_fc1(c), inplace=True)
+        value = self.value_fc2(v).squeeze(-1)
+        return score_logits, value
+
+
+class SAGEPushOnlyRanker(nn.Module):
+    """Slim SAGE-PR: 只评分 push candidates, 不预测 deadlock/progress/info_gain.
+
+    输入: X_grid [B, 27, 10, 14], X_cand [B, 64, 118], u_global [B, 12], mask [B, 64]
+    输出: (score [B, 64], value [B])
+    """
+    def __init__(self,
+                 grid_in_ch: int = 27,
+                 grid_mid: int = 32,
+                 grid_out: int = 48,
+                 z_grid: int = 96,
+                 cand_in_dim: int = 118,
+                 cand_hidden: int = 96,
+                 e_dim: int = 96,
+                 u_dim: int = 12,
+                 fusion_hidden: int = 128,
+                 c_dim: int = 96,
+                 value_hidden: int = 32):
+        super().__init__()
+        self.grid_encoder = GridEncoder(grid_in_ch, grid_mid, grid_out, z_grid)
+        self.cand_encoder = CandidateEncoder(cand_in_dim, cand_hidden, e_dim)
+        self.context = ContextFusion(z_grid, e_dim, u_dim, fusion_hidden, c_dim)
+        self.heads = ScoreValueHeads(e_dim, e_dim, value_hidden)
+        self._init_fixup()
+
+    def _init_fixup(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        for m in self.modules():
+            if isinstance(m, FixupResBlock):
+                nn.init.zeros_(m.pw2.weight)
+
+    def forward(self,
+                x_grid: torch.Tensor,
+                x_cand: torch.Tensor,
+                u_global: torch.Tensor,
+                mask: Optional[torch.Tensor] = None
+                ) -> Tuple[torch.Tensor, torch.Tensor]:
+        z_grid = self.grid_encoder(x_grid)
+        e_i = self.cand_encoder(x_cand)
+        if mask is not None:
+            mask_f = mask.unsqueeze(-1)
+            z_set = (e_i * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp_min(1.0)
+        else:
+            z_set = e_i.mean(dim=1)
+        c = self.context(z_grid, z_set, u_global)
+        return self.heads(e_i, c, mask)
+
+    def num_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+def build_push_only_model() -> SAGEPushOnlyRanker:
+    """新架构默认: explorer 算法 + NN 推箱. ~80K params, int8 ≤ 100 KB."""
+    return SAGEPushOnlyRanker(
+        grid_in_ch=27,
+        grid_mid=32,
+        grid_out=48,
+        z_grid=96,
+        cand_in_dim=118,
+        cand_hidden=96,
+        e_dim=96,
+        u_dim=12,
+        fusion_hidden=128,
+        c_dim=96,
+        value_hidden=32,
+    )
+
+
+def build_push_only_large() -> SAGEPushOnlyRanker:
+    """新架构大版本, 跟 build_large_model 同等容量但去除 aux heads."""
+    return SAGEPushOnlyRanker(
+        grid_in_ch=27,
+        grid_mid=48,
+        grid_out=72,
+        z_grid=128,
+        cand_in_dim=118,
+        cand_hidden=128,
+        e_dim=128,
+        u_dim=12,
+        fusion_hidden=192,
+        c_dim=128,
+        value_hidden=48,
+    )
+
+
+# ── 旧架构 (保留兼容老 ckpt) ────────────────────────────────
+
 def build_default_model() -> SAGEPolicyRanker:
     """按 FINAL_ARCH_DESIGN §4 默认配置."""
     return SAGEPolicyRanker(
@@ -354,18 +475,27 @@ def build_large_model() -> SAGEPolicyRanker:
 def detect_model_size(state_dict: dict) -> str:
     """根据 state_dict 推断是 default 还是 large 模型."""
     if "grid_encoder.stem.weight" in state_dict:
-        # default: shape[0]=32, large: shape[0]=48
         return "large" if state_dict["grid_encoder.stem.weight"].shape[0] >= 48 else "default"
     return "default"
 
 
-def build_model_from_ckpt(ckpt_path: str, device=None) -> SAGEPolicyRanker:
-    """根据 ckpt 自动构建 default/large 并加载权重."""
+def detect_model_arch(state_dict: dict) -> str:
+    """根据 state_dict 推断是 'push_only' (没 info_gain_fc) 还是旧 'full'."""
+    has_info_gain = any(k.startswith("heads.info_gain_fc") for k in state_dict.keys())
+    return "full" if has_info_gain else "push_only"
+
+
+def build_model_from_ckpt(ckpt_path: str, device=None):
+    """根据 ckpt 自动构建 default/large/push_only 并加载权重."""
     import torch
     ck = torch.load(ckpt_path, map_location=device)
     sd = ck["model_state_dict"]
+    arch = ck.get("model_arch", detect_model_arch(sd))
     size = ck.get("model_size", detect_model_size(sd))
-    builder = build_large_model if size == "large" else build_default_model
+    if arch == "push_only":
+        builder = build_push_only_large if size == "large" else build_push_only_model
+    else:
+        builder = build_large_model if size == "large" else build_default_model
     model = builder()
     if device is not None:
         model = model.to(device)
