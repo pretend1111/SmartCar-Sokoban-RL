@@ -195,12 +195,28 @@ def rollout_search_episode(model, device, map_path: str, seed: int,
                             beam_width: int = 3, lookahead: int = 4,
                             fully_observed: bool = True,
                             enforce_sigma_lock: bool = False,
+                            use_external_explorer: bool = False,
                             ) -> Tuple[bool, int, float]:
     import random
     random.seed(seed)
 
     eng = GameEngine()
     eng.reset(map_path)
+
+    # 部署对齐: 跑 explorer, 让车走到 NN 接管的真实起点 (post-explorer state)
+    if use_external_explorer:
+        import contextlib, io
+        from smartcar_sokoban.solver.explorer_v3 import plan_exploration_v3
+        from smartcar_sokoban.solver.explorer import exploration_complete
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                plan_exploration_v3(eng, max_retries=15)
+            except Exception:
+                pass
+        if not exploration_complete(eng.get_state()):
+            # explorer 失败 → 这张图部署本身就过不去, 算 fail
+            return False, 0, 0.0
+
     inf_total = 0.0
     inf_calls = 0
     visited = set()
@@ -239,6 +255,7 @@ def evaluate_phase_rollout(model, device, phase: int, seeds_per_map: List[int],
                             verified_seeds_map: Optional[Dict[str, List[int]]] = None,
                             fully_observed: bool = True,
                             enforce_sigma_lock: bool = False,
+                            use_external_explorer: bool = False,
                             ) -> Dict:
     maps = list_phase_maps(phase)
     if max_maps is not None:
@@ -260,6 +277,7 @@ def evaluate_phase_rollout(model, device, phase: int, seeds_per_map: List[int],
                 beam_width=beam_width, lookahead=lookahead,
                 fully_observed=fully_observed,
                 enforce_sigma_lock=enforce_sigma_lock,
+                use_external_explorer=use_external_explorer,
             )
             n_total += 1
             if won:
@@ -291,6 +309,9 @@ def main():
     parser.add_argument("--lookahead", type=int, default=4)
     parser.add_argument("--mode", choices=["v1", "v2"], default="v1",
                         help="v1=fully_observed; v2=partial-obs + enforce_sigma_lock")
+    parser.add_argument("--external-explorer", action="store_true",
+                        help="跑前 plan_exploration_v3 让车走到部署起点 (post-explorer state). "
+                             "跟训练数据分布对齐, 也是部署架构的真实模拟.")
     parser.add_argument("--out", type=str, default=None)
     args = parser.parse_args()
     fully_observed = (args.mode == "v1")
@@ -323,6 +344,7 @@ def main():
             verified_seeds_map=verified_map,
             fully_observed=fully_observed,
             enforce_sigma_lock=enforce_sigma_lock,
+            use_external_explorer=args.external_explorer,
         )
         elapsed = time.perf_counter() - t0
         print(f"  win_rate = {r['win_rate']*100:.2f}% ({r['n_won']}/{r['n_total']}); "

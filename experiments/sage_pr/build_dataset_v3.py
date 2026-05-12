@@ -200,16 +200,20 @@ class Sample:
 def collect_episode(map_path: str, phase: int, seed: int,
                     *, strategy: str, max_cost: int, time_limit: float,
                     fully_observed: bool = True,
-                    use_macro: bool = True) -> Tuple[List[Sample], str]:
+                    use_macro: bool = True,
+                    pre_explorer: bool = True) -> Tuple[List[Sample], str]:
     """采集单张图的所有样本.
 
     Returns:
         (samples, status)
-        status in {"ok", "no_solve", "label_miss", "step_fail", "no_samples"}
+        status in {"ok", "no_solve", "label_miss", "step_fail", "no_samples", "explore_fail"}
 
     Args:
         use_macro: 若 True, 把连续 same (entity, dir) 推送压成 macro action
             (run_length=1..3), 缩短轨迹长度.
+        pre_explorer: 若 True (默认), 先跑 plan_exploration_v3 让车走到部署起点,
+            然后从 post-explorer 状态求解 + 采样. 跟部署架构对齐 (explorer 跑在板上,
+            NN 接管推箱).
     """
     eng = GameEngine()
     import smartcar_sokoban.map_loader as map_loader_module
@@ -218,6 +222,20 @@ def collect_episode(map_path: str, phase: int, seed: int,
     random.seed(seed)
 
     state = eng.reset(map_path)
+
+    # 部署对齐: 跑 explorer, 让 engine 推进到 NN 接管的真实起点
+    if pre_explorer:
+        from smartcar_sokoban.solver.explorer_v3 import plan_exploration_v3
+        from smartcar_sokoban.solver.explorer import exploration_complete
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                plan_exploration_v3(eng, max_retries=15)
+            except Exception:
+                return [], "explore_fail"
+        if not exploration_complete(eng.get_state()):
+            return [], "explore_fail"
+        state = eng.get_state()
+
     moves = solve_map(state, max_cost=max_cost, time_limit=time_limit, strategy=strategy)
     if not moves:
         return [], "no_solve"
@@ -226,9 +244,8 @@ def collect_episode(map_path: str, phase: int, seed: int,
         SOURCE_BF if strategy == "best_first" else SOURCE_AUTO
     )
 
-    # 重新 reset (相同 seed) 以保证 ID 配置一致
-    random.seed(seed)
-    state = eng.reset(map_path)
+    # NOTE: 不再二次 reset. engine 当前状态 = post-explorer (或初始, 取决于 pre_explorer),
+    # 是 solver 算 moves 的起点, 直接从这开始采样.
 
     samples: List[Sample] = []
     label_miss = 0
