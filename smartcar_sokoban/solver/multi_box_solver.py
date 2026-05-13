@@ -79,7 +79,9 @@ class MultiBoxSolver:
     def __init__(self, grid, car_pos: Pos,
                  boxes: List[BoxEntry],
                  targets: Dict[int, Pos],
-                 bombs: List[Pos]):
+                 bombs: List[Pos],
+                 trigger_map: Optional[Dict] = None,
+                 belief_weight: float = 0.0):
         self.base_grid = [row[:] for row in grid]
         self.rows = len(grid)
         self.cols = len(grid[0]) if self.rows else 0
@@ -119,6 +121,18 @@ class MultiBoxSolver:
         # 统计
         self.nodes = 0
         self.best_solution = None
+
+        # Memoization caches (跨 solve_kbest 子调用共享, 大幅加速)
+        self._heuristic_cache: Dict[MBState, int] = {}
+        self._deadlock_cache: Dict[MBState, bool] = {}
+
+        # ── Belief-aware cost augmentation ──
+        # trigger_map: dict (cell, q4) -> set of scan_indices revealed
+        # belief_weight: bonus 系数. push 走的路径上每出现一个未识别 trigger config -> 走路 cost 减 belief_weight
+        # 这让 solver 主动选 walk-reveal 友好的推法, 减少后续 explicit scan.
+        self._trigger_map = trigger_map or {}
+        self._belief_weight = belief_weight
+        self._bonus_cache: Dict[Tuple[Pos, Pos], int] = {}
 
     # ── 网格工具 ───────────────────────────────────────────
 
@@ -400,6 +414,8 @@ class MultiBoxSolver:
         使用当前 destroyed 状态对应的地图计算推送距离.
         如果有目标墙还未被炸, 加上炸弹到引爆点的最小推送距离.
         """
+        cached = self._heuristic_cache.get(state)
+        if cached is not None: return cached
         push_dist = self._get_push_dist(state.destroyed)
         h = 0
         for (bc, br), cid in state.boxes:
@@ -445,14 +461,18 @@ class MultiBoxSolver:
                         if min_total < 999999:
                             h += min_total
 
+        self._heuristic_cache[state] = h
         return h
 
     # ── 死锁检测 ───────────────────────────────────────────
 
     def _is_deadlock(self, state: MBState) -> bool:
+        cached = self._deadlock_cache.get(state)
+        if cached is not None: return cached
         grid = self._get_grid(state.destroyed)
         push_dist = self._get_push_dist(state.destroyed)
 
+        result = False
         for (bc, br), cid in state.boxes:
             target = self.targets.get(cid)
             if target and (bc, br) == target:
@@ -467,15 +487,16 @@ class MultiBoxSolver:
                 wr = self._is_wall(grid, bc + 1, br)
 
                 if (wu and wl) or (wu and wr) or (wd and wl) or (wd and wr):
-                    return True
+                    result = True; break
 
             # 检查箱子是否到不了目标 (当前地图)
             if cid in push_dist:
                 if (bc, br) not in push_dist[cid]:
                     if not state.bombs:
-                        return True
+                        result = True; break
 
-        return False
+        self._deadlock_cache[state] = result
+        return result
 
     # ── 车的 BFS 移动 ─────────────────────────────────────
 
@@ -572,6 +593,38 @@ class MultiBoxSolver:
                 continue
             return True
 
+    _DIR_Q4_LOOKUP = {(1, 0): 0, (0, 1): 1, (-1, 0): 2, (0, -1): 3}
+
+    def _compute_belief_bonus(self, start: Pos, end: Pos,
+                                push_dir: Optional[Tuple[int, int]],
+                                grid, occupied: Set[Pos]) -> int:
+        """Belief-aware bonus: 走从 start 到 end 的最短路径上, 经过多少 unique 触发配置
+        (cell, q4) 命中 trigger_map. 再算 push 后落点的额外 reveal.
+        每个 unique scan_idx 算 1.
+        """
+        if not self._trigger_map: return 0
+        path = self._car_bfs_path(start, end, grid, occupied)
+        if path is None: return 0
+        revealed = 0
+        cur = start
+        for dx, dy in path:
+            cell = (cur[0] + dx, cur[1] + dy)
+            q4 = self._DIR_Q4_LOOKUP.get((dx, dy))
+            if q4 is not None:
+                ents = self._trigger_map.get((cell, q4))
+                if ents:
+                    for j in ents: revealed |= (1 << j)
+            cur = cell
+        # 加 push 落点 reveal: push 后车在 push_pos+push_dir, 朝 push_dir
+        if push_dir is not None:
+            after_pos = (cur[0] + push_dir[0], cur[1] + push_dir[1])
+            q4 = self._DIR_Q4_LOOKUP.get(push_dir)
+            if q4 is not None:
+                ents = self._trigger_map.get((after_pos, q4))
+                if ents:
+                    for j in ents: revealed |= (1 << j)
+        return bin(revealed).count('1')
+
     def _enum_pushes(self, state: MBState):
         """枚举所有合法推操作 (支持 8 方向 + 链式推).
 
@@ -579,7 +632,7 @@ class MultiBoxSolver:
            entity_type: 'box' 或 'bomb'
            entity_id: BoxEntry 或 Pos
            direction: (dx, dy)
-           walk_cost: 车走到推位的步数
+           walk_cost: 车走到推位的步数 (可能被 belief-bonus 调整)
         """
         grid = self._get_grid(state.destroyed)
         occupied = self._get_occupied(state)
@@ -803,11 +856,21 @@ class MultiBoxSolver:
 
     def _solve_best_first(self, max_cost: int,
                           time_limit: float,
-                          weight: float = 1.5) -> Optional[List]:
-        """Weighted A*: 优先找可行解, 适合高分支复杂图."""
-        start = self.initial
+                          weight: float = 1.5,
+                          start_state: Optional['MBState'] = None,
+                          prefix: Optional[List] = None,
+                          quiet: bool = False) -> Optional[List]:
+        """Weighted A*: 优先找可行解, 适合高分支复杂图.
+
+        K-best 支持:
+          start_state: 从指定 state 开始搜索 (默认 self.initial).
+          prefix: 已经执行的 move 序列 (前缀). 返回 plan 会拼上前缀.
+          quiet: 抑制日志输出.
+        """
+        start = start_state if start_state is not None else self.initial
+        prefix = list(prefix) if prefix else []
         start_h = self._heuristic(start)
-        if start_h >= 999999 and not self.initial.bombs:
+        if start_h >= 999999 and not start.bombs:
             return None
 
         t0 = time.perf_counter()
@@ -842,11 +905,12 @@ class MultiBoxSolver:
                     cur = prev
                 path.reverse()
                 elapsed = time.perf_counter() - t0
-                print(f"  BestFirst: ✅ 找到解! 推操作={len(path)}, "
-                      f"总步数={sum(wc + 1 for _, _, _, wc in path)}, "
-                      f"节点={nodes}, 耗时={elapsed:.2f}s")
+                if not quiet:
+                    print(f"  BestFirst: ✅ 找到解! 推操作={len(prefix) + len(path)}, "
+                          f"总步数={sum(wc + 1 for _, _, _, wc in prefix + path)}, "
+                          f"节点={nodes}, 耗时={elapsed:.2f}s")
                 self.nodes = nodes
-                return path
+                return prefix + path
 
             if self._is_deadlock(state):
                 continue
@@ -881,8 +945,121 @@ class MultiBoxSolver:
                      next(counter), new_state)
                 )
 
-        print("  BestFirst: 无解")
+        if not quiet:
+            print("  BestFirst: 无解")
         return None
+
+    def solve_kbest(self, k: int = 5,
+                    max_cost: int = 300,
+                    time_limit: float = 30.0) -> List[List]:
+        """枚举 K 个 (可能多样化) god plan, 按 cost 排序返回.
+
+        策略:
+          1. 先解出 base plan (无约束, optimal).
+          2. 对每个能合法 first-push 的箱子 / 推方向, 强制 first move = 该 push,
+             从 state-after-first-move 继续 A*. 得到 first-push 多样的备选 plan.
+          3. 去重 (按 plan tuple), 按 cost 排序, 返回 top-K.
+
+        time_limit 分摊到 base + 每个变体. quiet 模式下不打印 base solver 日志.
+        """
+        if k <= 0: return []
+        plans: List[List] = []
+        seen = set()
+
+        def cost(p): return sum(wc + 1 for _, _, _, wc in p)
+
+        def add_plan(p):
+            if p is None: return
+            key = tuple(p)
+            if key in seen: return
+            seen.add(key)
+            plans.append(p)
+
+        t0 = time.perf_counter()
+        # base
+        base_budget = max(0.5, time_limit * 0.4)
+        base = self._solve_best_first(max_cost, base_budget, quiet=False)
+        add_plan(base)
+        if base is None and not self.initial.bombs:
+            return []
+
+        # 枚举所有合法 first-push (state.initial → 推不同 box)
+        initial_pushes = list(self._enum_pushes(self.initial))
+        # 按 (entity_id pos) 分组, 每个 entity 取所有方向作为候选 first-move
+        by_pos = {}
+        for move in initial_pushes:
+            etype, eid, direction, wc = move
+            pos_key = eid[0] if etype == 'box' else eid
+            by_pos.setdefault(pos_key, []).append(move)
+
+        remaining_budget = max(0.5, time_limit - (time.perf_counter() - t0))
+        per_variant = max(0.3, remaining_budget / max(len(by_pos), 1))
+
+        # 每个 entity 取 1 个方向 (top-1) — swap variant 补充多样性
+        first_move_candidates = []
+        for pos_key, moves in by_pos.items():
+            first_move_candidates.append(min(moves, key=lambda m: m[3]))
+        # 跳过 base plan 已有的 first push
+        base_first = tuple(base[0]) if base else None
+        for first_move in first_move_candidates:
+            if len(plans) >= k * 2: break
+            if time.perf_counter() - t0 > time_limit: break
+            if base_first == tuple(first_move): continue  # 已是 base
+            etype, eid, direction, walk_cost = first_move
+            state1 = self._apply_push(self.initial, etype, eid, direction)
+            if state1 is None: continue
+            if self._is_deadlock(state1): continue
+            rest_max_cost = max_cost - (walk_cost + 1)
+            if rest_max_cost <= 0: continue
+            variant = self._solve_best_first(
+                rest_max_cost, per_variant,
+                start_state=state1, prefix=[first_move], quiet=True
+            )
+            add_plan(variant)
+
+        # ── push-swap permutation 变体 (Plan A.11) ──
+        # 对每个 base/variant plan, 尝试交换相邻 commutative push 对.
+        # 同 push 顺序但 box-level 等价 → 不同 walk 路径 → 可能 belief-aware 更友好.
+        swap_variants = []
+        for plan in list(plans):   # 拷贝因为 add_plan 会 mutate
+            swap_variants.extend(self._generate_swap_variants(plan))
+        for v in swap_variants:
+            add_plan(v)
+
+        # 按 cost 排序, 截断 (留更宽空间给 swap 变体)
+        plans.sort(key=cost)
+        return plans[:max(k, k * 2)]
+
+    def _generate_swap_variants(self, plan: List) -> List[List]:
+        """生成交换相邻 commutative 推对的 plan 变体.
+        两个 push 在 box-level 等价 (boxes/bombs/destroyed 相同, car_pos 可不同) 视为可交换.
+        车位置不同→ 不同 walk 路径 → 给 v18 belief-aware 评估更多多样性。
+        """
+        if not plan or len(plan) < 2: return []
+        states_orig = [self.initial]
+        cur = self.initial
+        for move in plan:
+            cur = self._apply_push(cur, *move[:3])
+            if cur is None: return []
+            states_orig.append(cur)
+        variants = []
+        seen_keys = set()
+        for i in range(len(plan) - 1):
+            if plan[i][:3] == plan[i+1][:3]: continue
+            s = self._apply_push(states_orig[i], *plan[i+1][:3])
+            if s is None: continue
+            s = self._apply_push(s, *plan[i][:3])
+            if s is None: continue
+            target = states_orig[i+2]
+            if (s.boxes != target.boxes or s.bombs != target.bombs
+                or s.destroyed != target.destroyed): continue
+            swapped = list(plan)
+            swapped[i], swapped[i+1] = swapped[i+1], swapped[i]
+            key = tuple((m[0], m[1], m[2]) for m in swapped)
+            if key in seen_keys: continue
+            seen_keys.add(key)
+            variants.append(swapped)
+        return variants
 
     def solve(self, max_cost: int = 300,
               time_limit: float = 30.0,
