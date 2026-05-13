@@ -353,7 +353,23 @@ def _recorder_model_search(map_path: str, seed: int):
     random.seed(seed)
     eng = GameEngine(); eng.reset(map_path)
     log: List[int] = []
-    info = {"won": False, "n_macros": 0}
+    info = {"won": False, "n_macros": 0, "n_explore_actions": 0}
+
+    # 部署架构: 先跑 BFS explorer 算法识别全部 entity, 然后 NN 接管 push
+    # 这样可视化里能看到完整流程: 探索阶段 (车转头/平移) → 推箱阶段 (NN)
+    with contextlib.redirect_stdout(io.StringIO()):
+        try:
+            explore_actions = plan_exploration_v3(eng, max_retries=15)
+        except Exception:
+            explore_actions = []
+    log.extend(explore_actions)
+    info["n_explore_actions"] = len(explore_actions)
+    if not exploration_complete(eng.get_state()):
+        # explorer 失败 → reset + NN 从初始接管 (fallback)
+        random.seed(seed)
+        eng = GameEngine(); eng.reset(map_path)
+        log.clear()
+        info["n_explore_actions"] = 0
 
     visited = {_state_signature(eng.get_state())}
     beam_width = 8
@@ -386,10 +402,39 @@ def _recorder_model_search(map_path: str, seed: int):
     return log, info
 
 
+def _recorder_training_data(map_path: str, seed: int):
+    """直接复现 build_dataset_v5._exact_fallback_episode 的逻辑 — 实际丢给模型训练的轨迹.
+
+    plan_exploration_v3 + MultiBoxSolver (time_limit=60s), 跟 v1_v3 等价,
+    但名字标明 = "训练数据原始轨迹", 方便诊断模型 vs 训练数据偏差.
+    """
+    random.seed(seed)
+    eng = GameEngine(); eng.reset(map_path)
+    log: List[int] = []
+    info = {"won": False, "n_explore": 0, "n_solve": 0,
+            "solver_ok": False, "_label": "training_data (build_dataset_v5 等价)"}
+    with contextlib.redirect_stdout(io.StringIO()):
+        explore = plan_exploration_v3(eng, max_retries=15)
+    info["n_explore"] = len(explore)
+    random.seed(seed); eng.reset(map_path)
+    for a in explore:
+        eng.discrete_step(a); log.append(a)
+    s = eng.get_state()
+    if not exploration_complete(s):
+        info["err"] = "explore_incomplete"
+        return log, info
+    ok = _record_solver_phase(eng, log, time_limit=60.0)
+    info["solver_ok"] = ok
+    info["n_solve"] = len(log) - info["n_explore"]
+    info["won"] = eng.get_state().won
+    return log, info
+
+
 RECORDERS: Dict[str, Callable] = {
     "v1_orig": _recorder_v1_orig,
     "v1_v2": _recorder_v1_v2,
     "v1_v3": _recorder_v1_v3,
+    "training_data": _recorder_training_data,
     "model": _recorder_model,
     "model_search": _recorder_model_search,
 }
@@ -420,7 +465,12 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--time-limit", type=float, default=30.0)
     parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--ckpt", default=".agent/sage_pr/runs/v5_push_only/best.pt",
+                        help="模型 ckpt 路径 (model / model_search recorder 用)")
     args = parser.parse_args()
+
+    # 推到 GLOBAL 让 recorder 读到
+    _MODEL_CKPT_GLOBAL["ckpt"] = args.ckpt
 
     recorders_list = [r.strip() for r in args.recorders.split(",") if r.strip()]
     for r in recorders_list:

@@ -75,6 +75,178 @@
 
 ---
 
+## 🎯 当前主任务 (2026-05-13 续): 步数对标老师 — 多起点扰动 BC
+
+> **背景**: v5_push_only 通关率 ≥98% 但 push 步数远多于老师 (phase6_11 模型 146 low vs 老师 66 low,2.2x). 根因是 BC distributional shift — 单一老师路径只覆盖 P_teacher(s) 一条线,模型 rollout 偏离 → OOD → 后续局部贪心累积失误. 解法是 **DAgger + 状态空间 augmentation**:每张图除了老师最优路径,还给老师**从扰动状态 / 多起点继续解**的轨迹,把训练分布扩展到 "老师能 recover 的整个相关状态空间".
+>
+> **目标**: 全量 1010+ maps eval --external-explorer **phase 1-6 全部 ≥ 95% 通关率** + **avg push low-level 步数 ≤ 老师 1.3x** (当前 2-3x). 输出 `<promise>DONE</promise>` 仅当两条都 unequivocally TRUE.
+>
+> **数据量约束**: 新数据 + 旧数据控制在 **~1M samples 总量** (旧 347k 的 ~3x). 严格筛查保质量,不要无脑扩量.
+
+## 🚀 Layer 1: 多起点扰动 BC — 任务清单
+
+### Step L1.1. 实现 `build_dataset_v8_perturbed.py`
+
+新脚本路径: `experiments/sage_pr/build_dataset_v8_perturbed.py`
+
+**核心数据生成逻辑** (每 (map, seed) 产 N+1 条轨迹):
+
+```python
+def collect_perturbed_episode(map_path, seed, n_perturbations=5):
+    """
+    返回多条 trajectory:
+        (a) 1 条 standard (老师最优, 跟 v5 一样)
+        (b) N 条 perturbed:
+            - reset engine, plan_exploration_v3
+            - solver 求 original moves
+            - random k in [0, len(moves)-3]
+            - 重放 moves[:k]
+            - 第 k 步: 从合法 cand 中随机选一个 *不是* 老师 label 的 cand
+            - apply 该 cand (引擎进入扰动后状态)
+            - 老师 (MultiBoxSolver auto, time_limit=30s) 从扰动后状态重新求解
+            - 若求解成功 + 总长度 ≤ 1.5x original: 收集 moves[:k] + perturb_cand + new_moves 的 (state, label) 样本
+            - 若求解失败 / 长度爆表: 丢弃该 perturbation
+    """
+```
+
+**筛查条件 (硬规则,不通过则丢弃整条扰动轨迹)**:
+1. `exploration_complete` 必须 True (跟 v5 一致, 探索失败的图本来就不该有训练样本)
+2. `original_moves` 必须存在 (老师能解原图)
+3. 扰动后 `new_moves` 必须存在 (老师能从扰动状态恢复)
+4. **长度约束**: `len(prefix) + 1 + len(new_moves) ≤ 1.5 * len(original_moves)` — 拒绝"扰动后老师步数翻倍"的样本 (那等于训练模型走更长的路)
+5. **扰动有效性**: 扰动的 cand 不能就是老师的最优 (随机抽要确保 idx != original_label)
+6. **per-map cap**: 同一 (map, seed) 最多产 `n_accepted` ≤ 5 条扰动轨迹 (避免单图淹没)
+
+**参数**:
+- `--n-perturbations 5` 每 (map, seed) 尝试扰动次数
+- `--max-accepted 5` 实际接受的扰动轨迹数 (筛后)
+- `--perturb-time-limit 30` 扰动后老师 re-solve 时限 (短一点保速度)
+- `--workers 6` 多进程
+- 输出: `runs/sage_pr/full_v8_perturbed/phase{p}_perturbed.npz`
+
+- [ ] 写好脚本
+- [ ] 单机 smoke test: 1 phase 10 maps, 看接受率 / 平均样本数 / 实际加速
+- **完成判定**: 脚本能产出 npz 文件, 接受率 > 30%, 平均每 (map, seed) 产 ~3-5 条扰动 trajectory
+
+### Step L1.2. 数据生成 + 筛查
+
+```bash
+# 单 phase, 测试用
+python experiments/sage_pr/build_dataset_v8_perturbed.py --phase 6 --use-verified-seeds --max-seeds-per-map 5 --n-perturbations 5 --max-accepted 5 --workers 6 --out runs/sage_pr/full_v8_perturbed/phase6_perturbed.npz
+
+# 全 phase, 长跑 (开监控)
+python scripts/monitor_resources.py --tag v8_data_gen &
+for p in 1 2 3 4 5 6; do
+  python experiments/sage_pr/build_dataset_v8_perturbed.py --phase $p ...
+done
+```
+
+**预算估算**:
+- 每 (map, seed) 试 5 次扰动 × ~30s/试 (含 explorer + 2 次 solver) = 150s
+- 1010 maps × 5 seeds × 150s / 6 workers = ~21 hr/phase
+- 6 phase 串行不行. **必须想办法加速 / 减量**.
+
+**加速策略 (选一)**:
+- (a) **限制 max_seeds_per_map=1** (单 verified seed/图), 数据从 347k 翻到 ~1.5x: 1010×1×6 perturb × 25样本 = 150k/phase, 6 phase = 900k total. 6 hr 跑完
+- (b) **限 max_maps_per_phase=400** 用 phase 5/6 难图为主: 400×5×6×25 = 300k/phase = 1.8M total. 8 hr 跑完
+- (c) **现有 v5 npz + 新扰动 npz 混训**: 不需要重生标准轨迹, 只生扰动. 时间减半
+
+推荐 **(c) + (a) 组合**: 只产扰动数据(不重生标准), single verified seed/map, 5 perturbations. 预期 4-5 hr 全 phase 跑完.
+
+**筛查后 sanity check**:
+- 加载新 npz, 看 `label != original_label` 的样本数(确认是真扰动)
+- 每 phase 样本数 / map 样本数分布 (避免一图淹没)
+- 跑 `verify_translator.py` 抽样 100 个新样本验证 cand → move → engine state 一致 (确保 cand encoding 没坏)
+
+- [ ] 全 phase 跑完
+- [ ] 筛查报告输出 (每 phase: total samples / 接受率 / 长度比 / 标签分布)
+- **完成判定**: 6 phase 的 perturbed npz 都生成, 总样本量 + 现有 v5 ≤ 1.2M, 翻译器 100% 验证
+
+### Step L1.3. 训练 v6_perturbed_bc
+
+混合训练数据:
+```bash
+python experiments/sage_pr/train_sage_pr.py \
+  --data runs/sage_pr/full_v5_v3/phase{1..6}_exact.npz \
+         runs/sage_pr/dagger_v1_r{1..16}*.npz \
+         runs/sage_pr/dagger_targeted_p5_v{1..5}.npz \
+         runs/sage_pr/full_v8_perturbed/phase{1..6}_perturbed.npz \
+  --tag v6_perturbed_bc --batch-size 256 --lr 3e-4 --epochs 60 \
+  --phase-dist hard --num-workers 0 --arch push_only --model large
+```
+
+**两种训练策略 (选一, 先试 fine-tune)**:
+- (i) **Fine-tune from v5_push_only**: `--init-ckpt .agent/sage_pr/runs/v5_push_only/best.pt --lr 5e-5 --epochs 30` (保留 v5 能力, 用新数据修补 distributional shift)
+- (ii) **From scratch**: `--lr 3e-4 --epochs 80` (彻底重训, 接受率高的话风险低)
+
+推荐先 (i), 看 eval 数字, 不够再 (ii).
+
+- [ ] train 跑通, 看 val_acc 提升幅度 (期待 ≥ 0.97 同 v5)
+- **完成判定**: train.log 显示 val_acc ≥ 0.97, 训练时间 < 1 hr
+
+### Step L1.4. eval + 步数对比
+
+```bash
+# 全量 eval 6 phase
+mkdir -p .agent/sage_pr/runs/v6_perturbed_bc/eval_full
+for p in 1 2 3 4 5 6; do
+  python experiments/sage_pr/rollout_search_eval.py \
+    --ckpt .agent/sage_pr/runs/v6_perturbed_bc/best.pt \
+    --phases $p --max-maps 1011 --use-verified-seeds \
+    --beam 8 --lookahead 25 --step-limit 60 --mode v1 \
+    --external-explorer \
+    --out .agent/sage_pr/runs/v6_perturbed_bc/eval_full/p${p}_failed.json \
+    > .agent/sage_pr/runs/v6_perturbed_bc/eval_full/p${p}.log 2>&1 &
+done
+```
+
+**关键指标 (除了通关率, 加 push 低层步统计)**:
+- 修改 `rollout_search_eval.py` 加 `--record-teacher-comparison` flag
+- 对每张 win 的图, 同时跑 v1_v3 老师, 算 `model_push_low / teacher_push_low` ratio
+- 输出 avg ratio per phase
+
+- [ ] eval 跑完
+- [ ] 出对比表: phase | v5 win_rate | v6 win_rate | v5 push_ratio | v6 push_ratio (目标 ratio ≤ 1.3)
+- **完成判定全部满足**: 6 phase 全 ≥ 95% AND 6 phase 平均 push_ratio ≤ 1.3
+
+### Step L1.5. 如未达标 → Layer 2/3 兜底
+
+- 如步数还不够: 加 progress head 监督 (Layer 2)
+- 如通关率掉了: 增加扰动接受率严格度,或者增加正常 trajectory 比例
+- 如还是不行: 用 v6 当 BC bootstrap, RL fine-tune (Layer 3)
+
+---
+
+## 数据筛查 detail (Step L1.1 / L1.2 关键)
+
+**为什么必须严格筛**:
+- 新数据量是旧的 ~3x, 不筛会爆显存
+- 扰动可能产生 "老师必须绕远路才能 recover" 的样本 → 模型学了反而效率更低
+- 标签分布偏移: 大部分扰动后 label 还是 push, 但有些可能 force 进 corner-case (模型记住了死锁恢复但忘了主流)
+
+**筛查代码骨架**:
+```python
+def filter_perturbed_trajectory(prefix_moves, perturb_cand, new_moves, original_len):
+    # (1) 长度约束
+    total = len(prefix_moves) + 1 + len(new_moves)
+    if total > 1.5 * original_len:
+        return False, "too_long"
+    # (2) 扰动有效性
+    if perturb_cand_idx == original_label_at_step_k:
+        return False, "same_as_teacher"
+    # (3) 新轨迹必须解出
+    if not new_moves or eng.state.won is False:
+        return False, "unsolvable_after_perturb"
+    # (4) 状态多样性 — sample 选过的状态不能重复 (按 _state_signature 去重)
+    return True, "ok"
+```
+
+**报告必须包含**:
+- 每 phase 总样本 / 总扰动尝试 / 接受率
+- 长度比分布 (avg / 90th / max)
+- per-map 样本量分布 (检测是否有图淹没)
+- label 分布 (push_box vs push_bomb 比例 vs 原数据)
+
 > **历史目标 (已废弃 - 自主探索路线)**: 用 V2 数据集 (god-mode A + 抑制场 + 嵌入 inspect) 训练模型让自己学探索. 已确认效率低 / inductive bias 错配 / 不必要. **改走 explorer 算法 + NN push 双系统**, 模型干净专注.
 >
 > **当前模型 (历史 baseline)**: `v3_large9/best.pt` (large 194K params 含 info_gain_head 等冗余). 不再使用, 但留作对比 baseline.
